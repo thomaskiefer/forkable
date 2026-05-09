@@ -349,7 +349,7 @@ async function streamAgentRun(runId, response) {
       runId: run.id,
     });
   } catch (error) {
-    await failRun(run.id, error);
+    await failRun(run.id, error, { postPlanningMessage: false });
     writeEvent({ type: 'error', error: formatPlanningChatError(error) });
   } finally {
     state.activeRunId = null;
@@ -1009,6 +1009,7 @@ function slugifyBranchPart(value) {
 
 async function executeRun(run, streamHandlers = {}) {
   log(`claimed run ${run.id}`);
+  const isStreaming = Boolean(streamHandlers.onDelta || streamHandlers.onStatus);
   streamHandlers.onStatus?.('Loading run context');
   await updateChangeRequest(run.change_request_id, { status: 'building' });
 
@@ -1082,6 +1083,28 @@ async function executeRun(run, streamHandlers = {}) {
     finalization,
     preview,
   });
+
+  if (!isStreaming) {
+    await createRunPlanningMessage({
+      runId: run.id,
+      changeRequestId: run.change_request_id,
+      planId: run.plan_id || null,
+      userId: run.user_id,
+      content: buildRunCompletionChatMessage({
+        runId: run.id,
+        status: checksPassed ? 'merged' : 'failed',
+        success: checksPassed,
+        finalization,
+        preview,
+      }),
+      metadata: {
+        provider: 'codex_runner',
+        run_id: run.id,
+        plan_id: run.plan_id || null,
+        kind: 'run_completion',
+      },
+    });
+  }
 
   return {
     finalMessage: codexResult.finalMessage,
@@ -2033,7 +2056,51 @@ async function createRunNotification({ run, request, success, finalization, prev
   assertDb(error, 'Unable to create run notification.');
 }
 
-async function failRun(runId, error) {
+function buildRunCompletionChatMessage({ runId, status, success, finalization, preview, error }) {
+  const lines = [
+    success
+      ? 'Build finished and shipped.'
+      : 'Build finished but needs attention.',
+    `Current status: ${status}.`,
+  ];
+
+  const deploymentUrl = finalization?.productionUrl || preview?.url;
+  if (deploymentUrl) lines.push(`Deployment: ${deploymentUrl}`);
+  if (error) lines.push(`Runner note: ${trimForDb(formatError(error))}`);
+  lines.push(`Run details: /feature-runs/${runId}`);
+
+  return lines.join('\n');
+}
+
+async function createRunPlanningMessage({ changeRequestId, planId, userId, content, metadata }) {
+  const { data: latestRows, error: latestError } = await insforge.database
+    .from('change_request_planning_messages')
+    .select('sort_order')
+    .eq('change_request_id', changeRequestId)
+    .order('sort_order', { ascending: false })
+    .range(0, 0);
+
+  assertDb(latestError, 'Unable to load latest planning message.');
+  const nextSortOrder = Number(latestRows?.[0]?.sort_order ?? -1) + 1;
+
+  const { error } = await insforge.database
+    .from('change_request_planning_messages')
+    .insert([{
+      change_request_id: changeRequestId,
+      role: 'assistant',
+      content: trimForDb(content),
+      sort_order: nextSortOrder,
+      metadata: {
+        ...metadata,
+        plan_id: planId,
+      },
+      user_id: userId,
+    }]);
+
+  assertDb(error, 'Unable to create run completion planning message.');
+}
+
+async function failRun(runId, error, options = {}) {
   const message = trimForDb(formatError(error));
   logError(error, { runId });
 
@@ -2055,6 +2122,36 @@ async function failRun(runId, error) {
   if (runningStep) {
     await setStep(runId, runningStep.order_index, 'failed', message);
   }
+
+  if (options.postPlanningMessage === false) return;
+
+  const { data: run, error: runError } = await insforge.database
+    .from('agent_runs')
+    .select('*')
+    .eq('id', runId)
+    .maybeSingle();
+
+  assertDb(runError, 'Unable to load failed run.');
+  if (!run) return;
+
+  await createRunPlanningMessage({
+    runId,
+    changeRequestId: run.change_request_id,
+    planId: run.plan_id || null,
+    userId: run.user_id,
+    content: buildRunCompletionChatMessage({
+      runId,
+      status: 'failed',
+      success: false,
+      error,
+    }),
+    metadata: {
+      provider: 'codex_runner',
+      run_id: runId,
+      plan_id: run.plan_id || null,
+      kind: 'run_completion',
+    },
+  });
 }
 
 async function updateRun(id, patch) {

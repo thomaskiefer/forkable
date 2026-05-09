@@ -2,6 +2,8 @@ import {
   addPlanningMessages,
   createQueuedAgentRunFromPlan,
   getAgentRun,
+  getAgentRunsForRequest,
+  getAgentSteps,
   getPlanningMessages,
   getTestResults,
   saveChangeRequestPlan,
@@ -11,6 +13,8 @@ import type {
   ChangeRequest,
   ChangeRequestPlan,
   ChangeRequestPlanningMessage,
+  AgentRun,
+  AgentStep,
 } from '@/lib/types';
 
 function serializeHistory(messages: ChangeRequestPlanningMessage[]) {
@@ -97,6 +101,56 @@ function buildFriendlyCompletionMessage(input: {
     lines.push('Merged, deployed, and enabled for your company.');
   } else if (input.runStatus) {
     lines.push(`Current status: ${input.runStatus.replaceAll('_', ' ')}.`);
+  }
+
+  return lines.join('\n');
+}
+
+function isRunStatusQuestion(text: string) {
+  const normalized = text.trim().toLowerCase();
+  return /^(status|status\?|what'?s the status|where is it|is it done|did it finish|is it finished|done\?)$/.test(normalized);
+}
+
+function isRunnerAlreadyWorkingOnRun(error: unknown, runId: string) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return (
+    message.includes(`Runner is already processing this run (${runId})`) ||
+    message.includes(`Runner is already processing ${runId}`) ||
+    message.includes('Queued agent run was not found')
+  );
+}
+
+function formatRunStatusMessage(run: AgentRun | null, steps: AgentStep[] = []) {
+  if (!run) {
+    return 'No build has been queued for this request yet.';
+  }
+
+  const lines = [`Current build status: ${run.status.replaceAll('_', ' ')}.`];
+  const activeStep = steps.find((step) => step.status === 'running');
+  const failedStep = [...steps].reverse().find((step) => step.status === 'failed');
+  const lastPassedStep = [...steps].reverse().find((step) => step.status === 'passed');
+  const visibleStep = activeStep ?? failedStep ?? lastPassedStep;
+
+  if (visibleStep) {
+    lines.push(`Latest step: ${visibleStep.label}.`);
+  }
+
+  if (run.preview_url) {
+    lines.push(`Deployment: ${run.preview_url}`);
+  }
+
+  if (run.runner_error) {
+    lines.push(`Runner note: ${run.runner_error}`);
+  }
+
+  lines.push(`Run details: /feature-runs/${run.id}`);
+
+  if (['queued', 'running'].includes(run.status)) {
+    lines.push('The background runner has this run. I will post a completion update when it finishes. The Run page has the most current step-by-step progress.');
+  } else if (run.status === 'merged') {
+    lines.push('This has been merged, deployed, and enabled according to the run record.');
+  } else if (run.status === 'failed') {
+    lines.push('This needs attention before it can be deployed.');
   }
 
   return lines.join('\n');
@@ -411,6 +465,41 @@ export async function streamImplementationMessage(input: {
           : [];
         const userMessage = savedUserMessages[0] ?? null;
 
+        if (userMessageText && isRunStatusQuestion(userMessageText)) {
+          const runs = (await getAgentRunsForRequest(input.request.id, input.accessToken)) as AgentRun[];
+          const latestRun = runs[0] ?? null;
+          const steps = latestRun
+            ? ((await getAgentSteps(latestRun.id, input.accessToken)) as AgentStep[])
+            : [];
+          const savedAssistantMessages = await addPlanningMessages(
+            input.request.id,
+            [{
+              role: 'assistant',
+              content: formatRunStatusMessage(latestRun, steps),
+              metadata: {
+                provider: 'codex_runner',
+                run_id: latestRun?.id ?? null,
+                kind: 'run_status',
+              },
+            }],
+            input.userId,
+            input.accessToken,
+          );
+          const assistantMessage = savedAssistantMessages[0];
+          if (!assistantMessage) throw new Error('Run status could not be saved.');
+
+          writeEvent({
+            type: 'done',
+            payload: {
+              userMessage,
+              assistantMessage,
+              run: latestRun ?? undefined,
+            },
+          });
+          controller.close();
+          return;
+        }
+
         writeEvent({ type: 'status', message: 'Drafting implementation handoff' });
         const plan = await draftChangeRequestPlan({
           request: input.request,
@@ -440,11 +529,12 @@ export async function streamImplementationMessage(input: {
         );
 
         if (run.status !== 'queued') {
+          const steps = (await getAgentSteps(run.id, input.accessToken)) as AgentStep[];
           const savedAssistantMessages = await addPlanningMessages(
             input.request.id,
             [{
               role: 'assistant',
-              content: 'A build is already running for this request. I will keep using that run instead of starting a duplicate.',
+              content: formatRunStatusMessage(run, steps),
               metadata: {
                 provider: 'codex_runner',
                 run_id: run.id,
@@ -472,13 +562,50 @@ export async function streamImplementationMessage(input: {
 
         let assistantText = '';
         writeEvent({ type: 'status', message: 'Starting coding agent' });
-        const finalContent = await streamRunnerImplementation({
-          runId: run.id,
-          onDelta: (delta) => {
-            assistantText += delta;
-          },
-          onStatus: (message) => writeEvent({ type: 'status', message }),
-        });
+        let finalContent = '';
+        try {
+          finalContent = await streamRunnerImplementation({
+            runId: run.id,
+            onDelta: (delta) => {
+              assistantText += delta;
+            },
+            onStatus: (message) => writeEvent({ type: 'status', message }),
+          });
+        } catch (error) {
+          if (!isRunnerAlreadyWorkingOnRun(error, run.id)) throw error;
+
+          const claimedRun = ((await getAgentRun(run.id, input.accessToken)) ?? run) as AgentRun;
+          const steps = (await getAgentSteps(run.id, input.accessToken)) as AgentStep[];
+          const savedAssistantMessages = await addPlanningMessages(
+            input.request.id,
+            [{
+              role: 'assistant',
+              content: formatRunStatusMessage(claimedRun, steps),
+              metadata: {
+                provider: 'codex_runner',
+                run_id: run.id,
+                plan_id: plan.id,
+                kind: 'run_status',
+              },
+            }],
+            input.userId,
+            input.accessToken,
+          );
+          const assistantMessage = savedAssistantMessages[0];
+          if (!assistantMessage) throw new Error('Coding agent status could not be saved.');
+
+          writeEvent({
+            type: 'done',
+            payload: {
+              userMessage,
+              assistantMessage,
+              run: claimedRun,
+              plan,
+            },
+          });
+          controller.close();
+          return;
+        }
 
         const completedRun = await getAgentRun(run.id, input.accessToken);
         const tests = await getTestResults(run.id, input.accessToken);
