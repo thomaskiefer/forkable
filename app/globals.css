@@ -281,7 +281,6 @@
 
   [data-rfd-draggable-id][data-is-dragging="true"],
   .is-dragging {
-    transform: rotate(-1.5deg) scale(1.02) !important;
     box-shadow: var(--shadow-xl) !important;
   }
 

@@ -150,6 +150,14 @@ FORKABLE_AGENT_RUNNER_URL=https://your-runner.fly.dev
 FORKABLE_RUNNER_WEBHOOK_SECRET=your-shared-secret
 ```
 
+Forkable uses Nia as the single context layer for agent runs. Index the product
+repo and any customer context sources, including Slack, in Nia, then provide the
+runner with:
+
+```bash
+NIA_API_KEY=your-nia-api-key
+```
+
 To activate an existing deployed runner, update its env with the target repo and
 keys, then set:
 

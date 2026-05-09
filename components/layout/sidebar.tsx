@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import {
   CalendarClock,
   LayoutDashboard,
@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Wordmark } from '@/components/logo';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { signOut } from '@/lib/auth-actions';
+import { dashboardPrefetchRoutes } from '@/components/layout/dashboard-route-prefetcher';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -40,7 +41,14 @@ function getActiveHref(pathname: string) {
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const activeHref = getActiveHref(pathname);
+
+  function prefetchRoute(href: string) {
+    if (dashboardPrefetchRoutes.includes(href)) {
+      router.prefetch(href);
+    }
+  }
 
   return (
     <aside className="relative z-10 flex h-full w-64 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground dark:bg-[#070707]/88 dark:backdrop-blur">
@@ -59,6 +67,9 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              prefetch
+              onFocus={() => prefetchRoute(item.href)}
+              onPointerEnter={() => prefetchRoute(item.href)}
               className={cn(
                 'group relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
                 isActive

@@ -170,7 +170,7 @@ BEGIN
       'Acme approval policy monitor',
       'Checks Acme Slack for approval threshold, reviewer, SLA, or blocked-stage changes and queues a reviewable product change when policy changes.',
       'Every weekday at 8am, check Acme Slack for changes to the approval threshold, legal reviewer, SLA, or blocked pipeline stages. If anything changed, create a feature request and draft a Nia-grounded implementation plan.',
-      'Monitor Acme Slack for approval policy changes. Use Hyperspell for Slack/customer context, then require Nia codebase planning before implementation.',
+      'Monitor Acme Slack for approval policy changes. Use Nia for Slack/customer context and codebase planning before implementation.',
       'Acme',
       'acme@forkable.site',
       'monitor_context',
@@ -183,7 +183,7 @@ BEGIN
       now() + interval '5 minutes',
       jsonb_build_object('source', 'demo_seed', 'slack_channel', '#acme-legal-review'),
       jsonb_build_object(
-        'hyperspell_expected_context',
+        'nia_slack_expected_context',
         jsonb_build_array('threshold', 'legal reviewer', 'SLA', 'blocked pipeline stages'),
         'nia_expected_context',
         jsonb_build_array('lead detail UI', 'pipeline stage update route', 'approval RPC', 'migrations and RLS')
@@ -221,9 +221,9 @@ BEGIN
       (
         v_task_id,
         'assistant',
-        'Scheduled. I will use Hyperspell for Acme Slack context, then require Nia-grounded code impact planning before any agent run is queued.',
+        'Scheduled. I will use Nia for Acme Slack context and Nia-grounded code impact planning before any agent run is queued.',
         1,
-        jsonb_build_object('context_sources', jsonb_build_array('Hyperspell Slack', 'Nia repo context')),
+        jsonb_build_object('context_sources', jsonb_build_array('Nia Slack context', 'Nia repo context')),
         p_user_id
       );
   END IF;

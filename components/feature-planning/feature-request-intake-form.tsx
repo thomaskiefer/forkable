@@ -71,22 +71,23 @@ export function FeatureRequestIntakeForm() {
       </div>
 
       <div className="mt-7 space-y-5">
-        <div className="space-y-2">
+        <div className="space-y-3">
           <Label htmlFor="title">Request title</Label>
           <Input
             id="title"
             name="title"
+            className="h-11 px-4"
             placeholder="Enterprise Deal Approval Gate"
             required
           />
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-3">
           <Label htmlFor="description">Workflow request</Label>
           <Textarea
             id="description"
             name="description"
-            className="min-h-28 resize-none"
+            className="min-h-28 resize-none px-4 py-3"
             placeholder="Any deal over $50k must go through Legal Review before it can move to Contract Sent or Closed Won."
             required
           />

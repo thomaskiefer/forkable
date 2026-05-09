@@ -142,7 +142,7 @@ BEGIN
     jsonb_build_object(
       'customer', 'Acme',
       'feature_key', 'enterprise_deal_approvals',
-      'context_sources', jsonb_build_array('planning_chat', 'change_request', 'Nia repo inspection', 'Hyperspell customer memory')
+      'context_sources', jsonb_build_array('planning_chat', 'change_request', 'Nia repo inspection', 'Nia customer context')
     ),
     now(),
     p_user_id

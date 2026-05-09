@@ -203,7 +203,13 @@ export function LeadPipeline({
       if (leadIndex === -1) return;
 
       const [lead] = sourceStage.leads.splice(leadIndex, 1);
-      destStage.leads.splice(result.destination.index, 0, {
+      const visibleDestLeads = filterLeads(destStage.leads, destStage);
+      const beforeLead = visibleDestLeads[result.destination.index];
+      const rawDestinationIndex = beforeLead
+        ? destStage.leads.findIndex((candidate) => candidate.id === beforeLead.id)
+        : destStage.leads.length;
+
+      destStage.leads.splice(rawDestinationIndex, 0, {
         ...lead,
         current_stage_id: destStageId,
       });
@@ -446,7 +452,7 @@ export function LeadPipeline({
       </div>
 
       <DragDropContext onDragEnd={handleDragEnd}>
-        <div className="-mx-2 flex gap-4 overflow-x-auto px-2 pb-6">
+        <div className="-mx-2 flex gap-4 px-2 pb-6">
           {stages.map((stage, i) => {
             const filteredLeads = filterLeads(stage.leads, stage);
             const stageValue = filteredLeads.reduce((acc, l) => acc + (l.deal_value ?? 0), 0);
