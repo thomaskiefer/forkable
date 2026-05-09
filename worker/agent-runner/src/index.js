@@ -290,6 +290,7 @@ function sleep(ms) {
 }
 
 async function processNextRun() {
+  await reconcileActiveRun();
   if (state.activeRunId) return;
 
   const run = await claimQueuedRun();
@@ -308,8 +309,12 @@ async function processNextRun() {
 }
 
 async function streamAgentRun(runId, response) {
+  await reconcileActiveRun();
   if (state.activeRunId) {
-    sendJson(response, 409, { error: `Runner is already processing ${state.activeRunId}.` });
+    const activeMessage = state.activeRunId === runId
+      ? `Runner is already processing this run (${state.activeRunId}).`
+      : `Runner is already processing ${state.activeRunId}.`;
+    sendJson(response, 409, { error: activeMessage });
     return;
   }
 
@@ -349,6 +354,28 @@ async function streamAgentRun(runId, response) {
   } finally {
     state.activeRunId = null;
     response.end();
+  }
+}
+
+async function reconcileActiveRun() {
+  if (!state.activeRunId) return;
+
+  const activeRunId = state.activeRunId;
+  try {
+    const { data, error } = await insforge.database
+      .from('agent_runs')
+      .select('id,status,runner_finished_at')
+      .eq('id', activeRunId)
+      .maybeSingle();
+
+    assertDb(error, 'Unable to reconcile active agent run.');
+
+    if (!data || data.status !== 'running' || data.runner_finished_at) {
+      log(`clearing stale active run ${activeRunId}`);
+      state.activeRunId = null;
+    }
+  } catch (error) {
+    logError(error, { source: 'reconcile-active-run', activeRunId });
   }
 }
 
@@ -1510,10 +1537,12 @@ function buildPlanningPrompt(body) {
     '- Use the private request context to know rollout scope, but do not mention the company name unless the user asks or it is needed for clarity.',
     '- Never ask which customer or company should receive the change; rollout scope comes from the authenticated user mapping.',
     '- Do not ask whether the feature should apply only to a CRM customer, deal account, or named company; assume the authenticated company account is the rollout scope unless the user explicitly asks for deal-account-specific behavior.',
-    '- Ask only for missing decisions that materially affect implementation.',
+    '- Ask only for missing decisions that materially affect implementation and cannot be reasonably inferred from common CRM behavior.',
+    '- If the submitted request is specific enough to implement, do not ask an extra preference question; state the understood behavior and say it is ready to build.',
+    '- For list/table sorting requests, assume server-backed sorting when pagination or filtering may exist, default directions from the request, and click-to-toggle directions unless the user says otherwise.',
     '- Keep the plan grounded in authenticated company scope, Git branches, InsForge backend branches, Nia repository context, Hyperspell company context, backend enforcement, preview deploys, smoke tests, and automatic merge/deploy.',
     '- Do not claim code has been changed.',
-    '- For the initial turn, begin helping immediately from the submitted description and ask the next useful scoping question.',
+    '- For the initial turn, begin helping immediately from the submitted description. Ask one concise scoping question only when the request is genuinely ambiguous.',
     '- Keep the reply concise and conversational.',
     '- If the request is ready, say it is ready to draft and send to the coding agent.',
     '',

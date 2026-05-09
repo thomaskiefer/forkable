@@ -439,6 +439,37 @@ export async function streamImplementationMessage(input: {
           input.accessToken,
         );
 
+        if (run.status !== 'queued') {
+          const savedAssistantMessages = await addPlanningMessages(
+            input.request.id,
+            [{
+              role: 'assistant',
+              content: 'A build is already running for this request. I will keep using that run instead of starting a duplicate.',
+              metadata: {
+                provider: 'codex_runner',
+                run_id: run.id,
+                plan_id: plan.id,
+              },
+            }],
+            input.userId,
+            input.accessToken,
+          );
+          const assistantMessage = savedAssistantMessages[0];
+          if (!assistantMessage) throw new Error('Coding agent status could not be saved.');
+
+          writeEvent({
+            type: 'done',
+            payload: {
+              userMessage,
+              assistantMessage,
+              run,
+              plan,
+            },
+          });
+          controller.close();
+          return;
+        }
+
         let assistantText = '';
         writeEvent({ type: 'status', message: 'Starting coding agent' });
         const finalContent = await streamRunnerImplementation({
@@ -501,7 +532,7 @@ function buildImplementationPlan(request: ChangeRequest) {
   return [
     `1. Use Nia to inspect the ${request.title} impact area before changing files: request/detail UI, pipeline movement, database queries, migrations, RLS policies, and existing shadcn components.`,
     '2. Create a safe Git branch and an InsForge backend branch so code, schema, RLS, and functions are isolated from production.',
-    `3. Add or reuse the feature flag ${request.feature_key ?? 'for this request'} and scope rollout to ${request.customer_name} through company_account_id/company_feature_flags.`,
+    `3. Add or reuse the feature flag ${request.feature_key ?? 'for this request'} and scope rollout to the requesting company through company_account_id/company_feature_flags.`,
     '4. Implement additive persistence for the requested workflow and audit trail; do not drop or rewrite existing CRM tables.',
     '5. Enforce the workflow in the backend path that mutates production state, not only in frontend UI.',
     '6. Add the smallest clear UI to explain the requirement, collect the missing decision, and show persisted status.',
@@ -513,7 +544,7 @@ function buildAcceptanceCriteria(request: ChangeRequest) {
   const customer = request.customer_name || 'the target customer';
 
   return [
-    `${customer} sees the new workflow only when the company feature flag is enabled.`,
+    `${customer} sees the new workflow only when their logged-in company feature flag is enabled.`,
     'Companies without the flag keep the existing CRM behavior.',
     'The backend rejects invalid state transitions when the workflow requirement has not been satisfied.',
     'The UI lets a user complete or request the required step and then shows persisted status.',

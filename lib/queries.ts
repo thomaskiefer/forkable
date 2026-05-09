@@ -1440,6 +1440,18 @@ export async function createQueuedAgentRunFromPlan(
   accessToken?: string | null,
 ) {
   const insforge = getInsforge(accessToken);
+  const { data: activeRuns, error: activeRunError } = await insforge.database
+    .from('agent_runs')
+    .select('*')
+    .eq('change_request_id', request.id)
+    .in('status', ['queued', 'running'])
+    .order('started_at', { ascending: false })
+    .range(0, 0);
+
+  assertNoDatabaseError(activeRunError, 'Unable to check existing coding agent runs.');
+  const activeRun = (activeRuns?.[0] ?? null) as AgentRun | null;
+  if (activeRun) return activeRun;
+
   const plannedFeatureKey = typeof plan.context_bundle.feature_key === 'string'
     ? plan.context_bundle.feature_key
     : null;
