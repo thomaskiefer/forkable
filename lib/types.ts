@@ -138,6 +138,18 @@ export interface DealApprovalAuditEvent {
   created_at: string;
 }
 
+export type AcmeClosePlanActionKey =
+  | 'confirm_legal_owner'
+  | 'attach_security_notes'
+  | 'schedule_procurement_follow_up';
+
+export interface AcmeClosePlanItem {
+  action_key: AcmeClosePlanActionKey;
+  completed_at?: string;
+  completed_by?: string;
+  notes?: string;
+}
+
 export interface LeadConversion {
   id: string;
   lead_id: string;

@@ -2,6 +2,7 @@ import { UPLOAD_BUCKET } from '@/lib/constants';
 import { createInsforgeServerClient, getInsforgeServerClient } from '@/lib/insforge';
 import type {
   AgentRun,
+  AcmeClosePlanItem,
   ChangeRequest,
   ChangeRequestPlan,
   ChangeRequestPlanningMessage,
@@ -273,6 +274,35 @@ export async function leadHasFeatureFlag(
 
   assertNoDatabaseError(error, 'Unable to load lead feature flag.');
   return data === true;
+}
+
+export async function getAcmeClosePlanItems(
+  leadId: string,
+  accessToken?: string | null,
+) {
+  const insforge = getInsforge(accessToken);
+  const { data, error } = await insforge.database.rpc('get_acme_close_plan_items', {
+    p_lead_id: leadId,
+  });
+
+  assertNoDatabaseError(error, 'Unable to load Acme close plan.');
+  return (data ?? []) as AcmeClosePlanItem[];
+}
+
+export async function completeAcmeClosePlanItem(
+  leadId: string,
+  actionKey: string,
+  notes?: string,
+  accessToken?: string | null,
+) {
+  const insforge = getInsforge(accessToken);
+  const { error } = await insforge.database.rpc('complete_acme_close_plan_item', {
+    p_lead_id: leadId,
+    p_action_key: actionKey,
+    p_notes: notes ?? null,
+  });
+
+  assertNoDatabaseError(error, 'Unable to complete Acme close-plan action.');
 }
 
 export async function getDealApprovalRequests(
