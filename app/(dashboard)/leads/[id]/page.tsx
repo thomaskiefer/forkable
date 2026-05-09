@@ -6,6 +6,7 @@ import {
   getLead,
   getLeadActivities,
   getLeadFollowUps,
+  hasFeatureFlag,
   leadHasFeatureFlag,
 } from '@/lib/queries';
 import { LeadDetail } from '@/components/leads/lead-detail';
@@ -31,7 +32,7 @@ export default async function LeadDetailPage({
     getLeadFollowUps(id, token),
     getDealApprovalRequests(id, token),
     leadHasFeatureFlag(id, 'enterprise_deal_approvals', viewer.id!, token),
-    leadHasFeatureFlag(id, 'acme_dashboard_close_plan', viewer.id!, token),
+    hasFeatureFlag('acme_dashboard_close_plan', token),
   ]);
 
   if (!lead) notFound();
