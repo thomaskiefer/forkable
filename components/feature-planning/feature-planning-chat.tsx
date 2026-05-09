@@ -1,8 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Terminal } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -18,6 +17,7 @@ import type {
 import { cn } from '@/lib/utils';
 
 type PendingMessage = ChangeRequestPlanningMessage & { pending?: boolean };
+type PlanningErrorMessage = PendingMessage & { failed?: boolean };
 
 function nowIso() {
   return new Date().toISOString();
@@ -61,15 +61,34 @@ function statusLabel(status: string) {
   return status.replaceAll('_', ' ');
 }
 
+function plannerErrorText(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error || 'Coding agent failed.');
+  if (
+    raw.includes('token_revoked') ||
+    raw.includes('refresh_token_invalidated') ||
+    raw.includes('invalidated oauth token') ||
+    raw.includes('refresh token has been invalidated')
+  ) {
+    return 'Codex authentication on the runner has expired. Reconnect Codex auth for the Forkable runner, then retry the planning chat.';
+  }
+
+  const withoutPrefix = raw.replace(/^(Planning|Coding) agent failed:\s*/i, '');
+  const firstLine = withoutPrefix.split('\n').find(Boolean) ?? withoutPrefix;
+  return firstLine.length > 240 ? `${firstLine.slice(0, 237)}...` : firstLine;
+}
+
 function MessageBubble({ message }: { message: PendingMessage }) {
   const isUser = message.role === 'user';
+  const isFailed = 'failed' in message && message.failed;
 
   return (
     <div className={cn('flex', isUser && 'justify-end')}>
       <div
         className={cn(
           'max-w-[82%] rounded-[0.65rem] border px-3 py-2 text-sm leading-6',
-          isUser
+          isFailed
+            ? 'border-destructive/30 bg-destructive/10 text-destructive'
+            : isUser
             ? 'border-primary/20 bg-primary text-primary-foreground'
             : 'bg-background dark:border-white/10 dark:bg-white/[0.055]',
           message.pending && 'opacity-70',
@@ -92,13 +111,12 @@ export function FeaturePlanningChat({
   initialPlan: ChangeRequestPlan | null;
   latestRun?: AgentRun | null;
 }) {
-  const router = useRouter();
   const [messages, setMessages] = useState<PendingMessage[]>(initialMessages);
   const [plan, setPlan] = useState<ChangeRequestPlan | null>(initialPlan);
+  const [currentRun, setCurrentRun] = useState<AgentRun | null>(latestRun ?? null);
   const [input, setInput] = useState('');
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [isDrafting, setIsDrafting] = useState(false);
-  const [isSendingAgent, setIsSendingAgent] = useState(false);
+  const [planningStatus, setPlanningStatus] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const nextSortOrder = useMemo(
@@ -115,10 +133,17 @@ export function FeaturePlanningChat({
     abortRef.current = controller;
 
     const userMessage = makePendingMessage('user', trimmed, nextSortOrder, request.id);
-    const assistantMessage = makePendingMessage('assistant', '', nextSortOrder + 1, request.id);
-    setMessages((current) => [...current, userMessage, assistantMessage]);
+    const initialAssistantMessage = makePendingMessage(
+      'assistant',
+      'Preparing the build...',
+      nextSortOrder + 1,
+      request.id,
+    );
+    let activeAssistantMessage = initialAssistantMessage;
+    setMessages((current) => [...current, userMessage, initialAssistantMessage]);
     setInput('');
     setIsSendingMessage(true);
+    setPlanningStatus('Queuing coding agent run');
 
     try {
       const response = await fetch(`/api/feature-requests/${request.id}/planning-chat`, {
@@ -136,6 +161,67 @@ export function FeaturePlanningChat({
       const decoder = new TextDecoder();
       let buffer = '';
 
+      const handleEvent = (event: FeaturePlanningStreamEvent | null) => {
+        if (!event) return;
+
+        if (event.type === 'delta') {
+          setPlanningStatus('Building feature');
+        }
+
+        if (event.type === 'message') {
+          const nextAssistantMessage = makePendingMessage(
+            'assistant',
+            'Building the feature now. I will post a short summary when it is shipped.',
+            event.payload.message.sort_order + 1,
+            request.id,
+          );
+          setMessages((current) =>
+            current
+              .map((message) =>
+                message.id === activeAssistantMessage.id
+                  ? event.payload.message
+                  : message,
+              )
+              .concat(nextAssistantMessage),
+          );
+          activeAssistantMessage = nextAssistantMessage;
+        }
+
+        if (event.type === 'status') {
+          setPlanningStatus(event.message);
+        }
+
+        if (event.type === 'warning') {
+          toast.warning(event.message);
+        }
+
+        if (event.type === 'error') {
+          const errorMessage = `Coding agent failed: ${plannerErrorText(event.error)}`;
+          setMessages((current) =>
+            current.map((message): PlanningErrorMessage =>
+              message.id === activeAssistantMessage.id
+                ? { ...message, content: errorMessage, failed: true, pending: false }
+                : message,
+            ),
+          );
+          throw new Error(errorMessage);
+        }
+
+        if (event.type === 'done') {
+          if (event.payload.plan) setPlan(event.payload.plan);
+          if (event.payload.run) setCurrentRun(event.payload.run);
+          setMessages((current) =>
+            current.map((message) => {
+              if (userMessage && message.id === userMessage.id && event.payload.userMessage) {
+                return event.payload.userMessage;
+              }
+              if (message.id === activeAssistantMessage.id) return event.payload.assistantMessage;
+              return message;
+            }),
+          );
+        }
+      };
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -145,89 +231,41 @@ export function FeaturePlanningChat({
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          const event = parseStreamLine(line);
-          if (!event) continue;
-
-          if (event.type === 'delta') {
-            setMessages((current) =>
-              current.map((message) =>
-                message.id === assistantMessage.id
-                  ? { ...message, content: `${message.content}${event.content}` }
-                  : message,
-              ),
-            );
-          }
-
-          if (event.type === 'warning') {
-            toast.warning(event.message);
-          }
-
-          if (event.type === 'error') {
-            throw new Error(event.error);
-          }
-
-          if (event.type === 'done') {
-            setMessages((current) =>
-              current.map((message) => {
-                if (message.id === userMessage.id) return event.payload.userMessage;
-                if (message.id === assistantMessage.id) return event.payload.assistantMessage;
-                return message;
-              }),
-            );
-          }
+          handleEvent(parseStreamLine(line));
         }
       }
+
+      handleEvent(parseStreamLine(buffer));
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
-      toast.error(error instanceof Error ? error.message : 'Unable to send message.');
-      setMessages((current) =>
-        current.filter(
-          (message) => message.id !== userMessage.id && message.id !== assistantMessage.id,
-        ),
-      );
+      const errorText = plannerErrorText(error);
+      toast.error(errorText);
+      setMessages((current) => {
+        const hasInlineError = current.some(
+          (message) =>
+            message.id === activeAssistantMessage.id &&
+            'failed' in message &&
+            message.failed,
+        );
+
+        if (hasInlineError) return current;
+
+        return current.map((message): PlanningErrorMessage =>
+          message.id === userMessage.id
+            ? { ...message, pending: false }
+            : message.id === activeAssistantMessage.id
+            ? {
+                ...message,
+                content: `${message.content.trim() ? `${message.content.trim()}\n\n` : ''}Coding agent failed: ${errorText}`,
+                failed: true,
+                pending: false,
+              }
+            : message,
+        );
+      });
     } finally {
       setIsSendingMessage(false);
-    }
-  }
-
-  async function draftPlan() {
-    setIsDrafting(true);
-    try {
-      const response = await fetch(`/api/feature-requests/${request.id}/planning-plan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'finalized' }),
-      });
-
-      if (!response.ok) throw new Error(await getErrorMessage(response));
-      const body = (await response.json()) as { plan: ChangeRequestPlan };
-      setPlan(body.plan);
-      toast.success('Plan drafted.');
-      router.refresh();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to draft plan.');
-    } finally {
-      setIsDrafting(false);
-    }
-  }
-
-  async function sendToAgent() {
-    setIsSendingAgent(true);
-    try {
-      const response = await fetch(`/api/feature-requests/${request.id}/agent-run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planId: plan?.id }),
-      });
-
-      if (!response.ok) throw new Error(await getErrorMessage(response));
-      const body = (await response.json()) as { run: { id: string } };
-      toast.success('Coding agent run queued.');
-      router.push(`/feature-runs/${body.run.id}`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to queue coding agent.');
-    } finally {
-      setIsSendingAgent(false);
+      setPlanningStatus(null);
     }
   }
 
@@ -243,8 +281,8 @@ export function FeaturePlanningChat({
           </div>
           <h1 className="truncate text-base font-semibold">{request.title}</h1>
         </div>
-        {latestRun ? (
-          <Link href={`/feature-runs/${latestRun.id}`} className="shrink-0">
+        {currentRun ? (
+          <Link href={`/feature-runs/${currentRun.id}`} className="shrink-0">
             <Button size="sm" variant="outline">
               Run
             </Button>
@@ -254,12 +292,19 @@ export function FeaturePlanningChat({
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            Chat through the request, then draft a plan.
-          </p>
+          <div className="space-y-2 text-sm text-muted-foreground">
+            <p>Coding agent ready.</p>
+            <p>Send the workflow request when you are ready to build it.</p>
+          </div>
         ) : (
           messages.map((message) => <MessageBubble key={message.id} message={message} />)
         )}
+        {planningStatus ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Terminal className="size-3.5" />
+            <span className="capitalize">{planningStatus}</span>
+          </div>
+        ) : null}
       </div>
 
       <footer className="border-t bg-background/70 p-3 dark:border-white/10 dark:bg-white/[0.035]">
@@ -269,40 +314,28 @@ export function FeaturePlanningChat({
             event.preventDefault();
             void sendMessage(input);
           }}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+              event.preventDefault();
+              event.currentTarget.requestSubmit();
+            }
+          }}
         >
           <Textarea
             value={input}
             onChange={(event) => setInput(event.currentTarget.value)}
-            placeholder="Message the planning agent..."
+            placeholder="Tell the coding agent what to build..."
             className="max-h-32 min-h-16 resize-none bg-card dark:border-white/12 dark:bg-white/[0.08] dark:text-white dark:placeholder:text-white/35"
             disabled={isSendingMessage}
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs text-muted-foreground">
-              {latestRun ? `Latest run: ${statusLabel(latestRun.status)}` : 'No run queued'}
+              {currentRun ? `Latest run: ${statusLabel(currentRun.status)}` : 'No run queued'}
             </div>
             <div className="flex gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={draftPlan}
-                disabled={isDrafting || isSendingAgent}
-              >
-                {isDrafting ? <Loader2 className="animate-spin" /> : null}
-                Draft plan
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={sendToAgent}
-                disabled={isDrafting || isSendingAgent}
-              >
-                {isSendingAgent ? <Loader2 className="animate-spin" /> : null}
-                Send to agent
-              </Button>
               <Button type="submit" disabled={!input.trim() || isSendingMessage}>
                 {isSendingMessage ? <Loader2 className="animate-spin" /> : null}
-                Send
+                Build feature
               </Button>
             </div>
           </div>

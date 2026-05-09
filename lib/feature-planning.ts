@@ -1,37 +1,17 @@
-import { createAIProvider, getAIProviderName } from '@/lib/ai';
-import { createInsforgeServerClient, getConfiguredModel } from '@/lib/insforge';
 import {
   addPlanningMessages,
+  createQueuedAgentRunFromPlan,
+  getAgentRun,
   getPlanningMessages,
+  getTestResults,
   saveChangeRequestPlan,
 } from '@/lib/queries';
+import { normalizeRunnerUrl, runnerEndpointUrl, runnerRequestError } from '@/lib/runner-url';
 import type {
   ChangeRequest,
   ChangeRequestPlan,
   ChangeRequestPlanningMessage,
 } from '@/lib/types';
-
-const PLANNER_SYSTEM_PROMPT = `You are Forkable's feature planning assistant.
-Your job is to help a logged-in company user refine one CRM workflow request into a safe coding-agent handoff.
-
-Operate like a pragmatic senior product engineer:
-- Ask only for missing decisions that materially affect implementation.
-- Keep the plan grounded in logged-in company scope, safe branching, InsForge backend branches, company feature flags, RLS, backend enforcement, preview deploys, smoke tests, and developer review.
-- Never ask the user which customer should receive the change; the target company comes from the authenticated user's company mapping.
-- Never claim code has been changed.
-- When the request is ready, summarize the finalized implementation plan and say it is ready to send to the coding agent.
-- Keep replies concise.`;
-
-function serializeRequest(request: ChangeRequest) {
-  return [
-    `Title: ${request.title}`,
-    `Company: ${request.customer_name}`,
-    `Requested by: ${request.customer_email}`,
-    `Status: ${request.status}`,
-    `Feature key: ${request.feature_key ?? 'not set'}`,
-    `Description: ${request.description}`,
-  ].join('\n');
-}
 
 function serializeHistory(messages: ChangeRequestPlanningMessage[]) {
   return messages
@@ -40,56 +20,95 @@ function serializeHistory(messages: ChangeRequestPlanningMessage[]) {
     .join('\n\n');
 }
 
-function fallbackAssistantReply(
-  request: ChangeRequest,
-  message: string,
-) {
-  const lowered = message.toLowerCase();
-  const isFinalizing =
-    lowered.includes('final') ||
-    lowered.includes('send') ||
-    lowered.includes('agent') ||
-    lowered.includes('implement') ||
-    lowered.includes('looks good');
-
-  if (isFinalizing) {
-    return [
-      `I can turn "${request.title}" into a coding-agent handoff now.`,
-      '',
-      `The implementation should stay additive: company feature flag, approval persistence, backend enforcement, feature-gated CRM UI, preview deployment, and smoke tests that prove ${request.customer_name} differs only where intended.`,
-      '',
-      'Use "Draft plan" to freeze the reviewed plan, then "Send to coding agent" to queue the implementation run.',
-    ].join('\n');
-  }
-
-  return [
-    'I would refine this around four decisions before implementation:',
-    '',
-    `1. Rollout: what company-level behavior should ${request.customer_name} receive first?`,
-    '2. Enforcement: which backend path blocks invalid stage movement?',
-    '3. Data model: what approval state and audit events must persist?',
-    '4. Proof: which smoke tests prove the customization is isolated?',
-    '',
-    `For the current request, the likely plan is ${request.customer_name}-scoped, backend-enforced, additive schema, focused CRM UI, and smoke tests for enabled-company and disabled-company behavior.`,
-  ].join('\n');
-}
-
 function getRunnerUrl() {
-  return process.env.FORKABLE_AGENT_RUNNER_URL?.replace(/\/+$/, '');
+  return normalizeRunnerUrl(process.env.FORKABLE_AGENT_RUNNER_URL);
 }
 
 function shouldUseCodexPlanner() {
-  return (
-    process.env.FEATURE_PLANNING_PROVIDER === 'codex' &&
-    Boolean(getRunnerUrl()) &&
-    Boolean(process.env.FORKABLE_RUNNER_WEBHOOK_SECRET)
-  );
+  return Boolean(getRunnerUrl()) && Boolean(process.env.FORKABLE_RUNNER_WEBHOOK_SECRET);
+}
+
+function publicPlanningError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  if (
+    message.includes('token_revoked') ||
+    message.includes('refresh_token_invalidated') ||
+    message.includes('invalidated oauth token') ||
+    message.includes('refresh token has been invalidated')
+  ) {
+    return 'Codex authentication on the runner has expired. Reconnect Codex auth for the Forkable runner, then retry the planning chat.';
+  }
+
+  if (message.includes('FORKABLE_TARGET_REPO_URL')) {
+    return 'The Forkable runner is missing its target repository configuration.';
+  }
+
+  if (message.includes('empty planning response')) {
+    return 'Codex returned an empty planning response. Retry the planning chat.';
+  }
+
+  if (message.includes('Command timed out')) {
+    return 'The planning agent timed out. Retry with a shorter request or check the runner logs.';
+  }
+
+  return message || 'The planning agent failed. Check the runner logs for details, then retry.';
+}
+
+function publicImplementationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  const planningMessage = publicPlanningError(error);
+  if (planningMessage !== message) return planningMessage;
+  return message || 'The coding agent failed. Check the runner logs for details, then retry.';
+}
+
+function countChangedFiles(summary: string) {
+  const explicitMatch = summary.match(/(?:files changed|changed files):?\s*(\d+)/i);
+  if (explicitMatch?.[1]) return Number(explicitMatch[1]);
+
+  const files = new Set<string>();
+  for (const line of summary.split('\n')) {
+    const trimmed = line.trim().replace(/^[-*]\s+/, '');
+    if (/^(app|components|lib|worker|migrations|public|schema)\/.+\.[\w.-]+$/.test(trimmed)) {
+      files.add(trimmed);
+    }
+  }
+
+  return files.size || null;
+}
+
+function buildFriendlyCompletionMessage(input: {
+  rawOutput: string;
+  runStatus?: string | null;
+  testsPassed: number;
+  testsTotal: number;
+}) {
+  const changedFiles = countChangedFiles(input.rawOutput);
+  const lines = ['Build finished.'];
+
+  if (changedFiles !== null) {
+    lines.push(`Changed ${changedFiles} ${changedFiles === 1 ? 'file' : 'files'}.`);
+  }
+
+  if (input.testsTotal > 0) {
+    lines.push(`Checks passed: ${input.testsPassed}/${input.testsTotal}.`);
+  }
+
+  if (input.runStatus === 'merged') {
+    lines.push('Merged, deployed, and enabled for your company.');
+  } else if (input.runStatus) {
+    lines.push(`Current status: ${input.runStatus.replaceAll('_', ' ')}.`);
+  }
+
+  return lines.join('\n');
 }
 
 async function getCodexPlanningReply(input: {
   request: ChangeRequest;
   messages: ChangeRequestPlanningMessage[];
   text: string;
+  isInitialKickoff?: boolean;
+  onDelta?: (delta: string) => void;
+  onStatus?: (message: string) => void;
 }) {
   const runnerUrl = getRunnerUrl();
   const secret = process.env.FORKABLE_RUNNER_WEBHOOK_SECRET;
@@ -98,9 +117,11 @@ async function getCodexPlanningReply(input: {
     throw new Error('Codex planner runner is not configured.');
   }
 
-  const response = await fetch(`${runnerUrl}/planning-chat`, {
+  const endpoint = '/planning-chat';
+  const response = await fetch(runnerEndpointUrl(runnerUrl, endpoint), {
     method: 'POST',
     headers: {
+      'Accept': input.onDelta ? 'application/x-ndjson' : 'application/json',
       'Authorization': `Bearer ${secret}`,
       'Content-Type': 'application/json',
     },
@@ -108,8 +129,13 @@ async function getCodexPlanningReply(input: {
       request: input.request,
       messages: input.messages,
       message: input.text,
+      isInitialKickoff: input.isInitialKickoff,
     }),
   });
+
+  if (input.onDelta && response.ok && response.body) {
+    return readCodexPlanningStream(response, input.onDelta, input.onStatus);
+  }
 
   const body = (await response.json().catch(() => ({}))) as {
     content?: string;
@@ -117,7 +143,7 @@ async function getCodexPlanningReply(input: {
   };
 
   if (!response.ok) {
-    throw new Error(body.error ?? 'Codex planner request failed.');
+    throw new Error(runnerRequestError(endpoint, response.status, body.error));
   }
 
   if (!body.content?.trim()) {
@@ -127,41 +153,64 @@ async function getCodexPlanningReply(input: {
   return body.content;
 }
 
-async function streamProviderPlanningReply(input: {
-  request: ChangeRequest;
-  messages: ChangeRequestPlanningMessage[];
-  text: string;
-  accessToken: string;
-  onDelta: (delta: string) => void;
-}) {
-  const insforge = createInsforgeServerClient({ accessToken: input.accessToken });
-  const provider = await createAIProvider(insforge);
-  const stream = await provider.streamCompletion({
-    model: getConfiguredModel(),
-    messages: [
-      { role: 'system', content: PLANNER_SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: [
-          'Feature request context:',
-          serializeRequest(input.request),
-          '',
-          'Planning conversation so far:',
-          serializeHistory(input.messages) || '(none yet)',
-          '',
-          `Latest user message: ${input.text}`,
-        ].join('\n'),
-      },
-    ],
-  });
+async function readCodexPlanningStream(
+  response: Response,
+  onDelta: (delta: string) => void,
+  onStatus?: (message: string) => void,
+) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Codex planner returned an empty stream.');
 
+  const decoder = new TextDecoder();
+  let buffer = '';
   let assistantText = '';
-  for await (const delta of stream) {
-    assistantText += delta;
-    input.onDelta(delta);
+  let finalContent = '';
+
+  const handleLine = (line: string) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line) as {
+      type?: string;
+      content?: string;
+      error?: string;
+      message?: string;
+    };
+
+    if (event.type === 'delta' && event.content) {
+      assistantText += event.content;
+      onDelta(event.content);
+    }
+
+    if (event.type === 'done') {
+      finalContent = event.content ?? assistantText;
+    }
+
+    if (event.type === 'status' && event.message) {
+      onStatus?.(event.message);
+    }
+
+    if (event.type === 'error') {
+      throw new Error(event.error ?? 'Codex planner request failed.');
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) handleLine(line);
   }
 
-  return assistantText;
+  if (buffer.trim()) handleLine(buffer);
+
+  const content = finalContent || assistantText;
+  if (!content.trim()) {
+    throw new Error('Codex planner returned an empty response.');
+  }
+
+  return content;
 }
 
 export async function streamPlanningMessage(input: {
@@ -169,6 +218,7 @@ export async function streamPlanningMessage(input: {
   text: string;
   userId: string;
   accessToken: string;
+  persistUserMessage?: boolean;
 }) {
   const existingMessages = await getPlanningMessages(input.request.id, input.accessToken);
   const encoder = new TextEncoder();
@@ -181,69 +231,59 @@ export async function streamPlanningMessage(input: {
 
       return (async () => {
         let assistantText = '';
-        let warning: string | null = null;
 
-        try {
-          if (shouldUseCodexPlanner()) {
-            assistantText = await getCodexPlanningReply({
-              request: input.request,
-              messages: existingMessages,
-              text: input.text,
-            });
-
-            for (const chunk of assistantText.match(/.{1,80}(\s|$)/g) ?? [assistantText]) {
-              writeEvent({ type: 'delta', content: chunk });
-            }
-          } else {
-            assistantText = await streamProviderPlanningReply({
-              request: input.request,
-              messages: existingMessages,
-              text: input.text,
-              accessToken: input.accessToken,
-              onDelta: (delta) => writeEvent({ type: 'delta', content: delta }),
-            });
-          }
-        } catch (error) {
-          warning =
-            error instanceof Error
-              ? `Planning agent unavailable: ${error.message}`
-              : 'Planning agent unavailable.';
-          assistantText = fallbackAssistantReply(input.request, input.text);
-          writeEvent({ type: 'warning', message: warning });
-
-          for (const chunk of assistantText.match(/.{1,80}(\s|$)/g) ?? [assistantText]) {
-            writeEvent({ type: 'delta', content: chunk });
-          }
+        if (!shouldUseCodexPlanner()) {
+          throw new Error(
+            'Codex planner runner is not configured. Set FORKABLE_AGENT_RUNNER_URL and FORKABLE_RUNNER_WEBHOOK_SECRET.',
+          );
         }
+
+        assistantText = await getCodexPlanningReply({
+          request: input.request,
+          messages: existingMessages,
+          text: input.text,
+          isInitialKickoff: input.persistUserMessage === false,
+          onDelta: (delta) => writeEvent({ type: 'delta', content: delta }),
+          onStatus: (message) => writeEvent({ type: 'status', message }),
+        });
 
         if (!assistantText.trim()) {
-          assistantText = fallbackAssistantReply(input.request, input.text);
-          writeEvent({
-            type: 'warning',
-            message: `${getAIProviderName()} returned an empty response; using the local planning fallback.`,
-          });
-          writeEvent({ type: 'delta', content: assistantText });
+          throw new Error('Codex planner returned an empty planning response.');
         }
 
-        const [userMessage, assistantMessage] = await addPlanningMessages(
+        const messagesToSave: Array<{
+          role: 'user' | 'assistant';
+          content: string;
+          metadata?: Record<string, unknown>;
+        }> = [
+          ...(input.persistUserMessage === false
+            ? []
+            : [
+                {
+                  role: 'user' as const,
+                  content: input.text,
+                },
+              ]),
+          {
+            role: 'assistant' as const,
+            content: assistantText,
+            metadata: {
+              provider: 'codex_runner',
+              ...(input.persistUserMessage === false ? { kickoff: true } : {}),
+            },
+          },
+        ];
+
+        const savedMessages = await addPlanningMessages(
           input.request.id,
-          [
-            {
-              role: 'user',
-              content: input.text,
-            },
-            {
-              role: 'assistant',
-              content: assistantText,
-              metadata: {
-                provider: shouldUseCodexPlanner() ? 'codex_runner' : getAIProviderName(),
-                ...(warning ? { warning } : {}),
-              },
-            },
-          ],
+          messagesToSave,
           input.userId,
           input.accessToken,
         );
+        const userMessage = input.persistUserMessage === false ? null : savedMessages[0];
+        const assistantMessage = savedMessages.at(-1);
+
+        if (!assistantMessage) throw new Error('Planning reply could not be saved.');
 
         writeEvent({
           type: 'done',
@@ -256,7 +296,190 @@ export async function streamPlanningMessage(input: {
       })().catch((error) => {
         writeEvent({
           type: 'error',
-          error: error instanceof Error ? error.message : 'Unable to complete planning chat.',
+          error: publicPlanningError(error),
+        });
+        controller.close();
+      });
+    },
+  });
+}
+
+async function streamRunnerImplementation(input: {
+  runId: string;
+  onDelta: (delta: string) => void;
+  onStatus?: (message: string) => void;
+}) {
+  const runnerUrl = getRunnerUrl();
+  const secret = process.env.FORKABLE_RUNNER_WEBHOOK_SECRET;
+
+  if (!runnerUrl || !secret) {
+    throw new Error('Forkable runner is not configured.');
+  }
+
+  const endpoint = `/agent-runs/${input.runId}/stream`;
+  const response = await fetch(runnerEndpointUrl(runnerUrl, endpoint), {
+    method: 'POST',
+    headers: {
+      Accept: 'application/x-ndjson',
+      Authorization: `Bearer ${secret}`,
+    },
+  });
+
+  const reader = response.body?.getReader();
+  if (!response.ok || !reader) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(runnerRequestError(endpoint, response.status, body.error));
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let assistantText = '';
+  let finalContent = '';
+
+  const handleLine = (line: string) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line) as {
+      type?: string;
+      content?: string;
+      error?: string;
+      message?: string;
+    };
+
+    if (event.type === 'delta' && event.content) {
+      assistantText += event.content;
+      input.onDelta(event.content);
+    }
+
+    if (event.type === 'status' && event.message) {
+      input.onStatus?.(event.message);
+    }
+
+    if (event.type === 'done') {
+      finalContent = event.content ?? assistantText;
+    }
+
+    if (event.type === 'error') {
+      throw new Error(event.error ?? 'Coding agent run failed.');
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) handleLine(line);
+  }
+
+  if (buffer.trim()) handleLine(buffer);
+
+  return finalContent || assistantText;
+}
+
+export async function streamImplementationMessage(input: {
+  request: ChangeRequest;
+  text: string;
+  userId: string;
+  accessToken: string;
+}) {
+  const encoder = new TextEncoder();
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const writeEvent = (event: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
+
+      return (async () => {
+        const savedUserMessages = await addPlanningMessages(
+          input.request.id,
+          [{ role: 'user', content: input.text }],
+          input.userId,
+          input.accessToken,
+        );
+        const userMessage = savedUserMessages[0] ?? null;
+
+        writeEvent({ type: 'status', message: 'Drafting implementation handoff' });
+        const plan = await draftChangeRequestPlan({
+          request: input.request,
+          userId: input.userId,
+          accessToken: input.accessToken,
+          status: 'finalized',
+        });
+        const planMessage = await addDraftedPlanMessage({
+          requestId: input.request.id,
+          plan,
+          userId: input.userId,
+          accessToken: input.accessToken,
+        });
+        writeEvent({
+          type: 'message',
+          payload: {
+            message: planMessage,
+          },
+        });
+
+        writeEvent({ type: 'status', message: 'Queuing coding agent run' });
+        const run = await createQueuedAgentRunFromPlan(
+          input.request,
+          plan,
+          input.userId,
+          input.accessToken,
+        );
+
+        let assistantText = '';
+        writeEvent({ type: 'status', message: 'Starting coding agent' });
+        const finalContent = await streamRunnerImplementation({
+          runId: run.id,
+          onDelta: (delta) => {
+            assistantText += delta;
+          },
+          onStatus: (message) => writeEvent({ type: 'status', message }),
+        });
+
+        const completedRun = await getAgentRun(run.id, input.accessToken);
+        const tests = await getTestResults(run.id, input.accessToken);
+        const testsPassed = tests.filter((test) => test.status === 'passed').length;
+        const rawOutput = (completedRun?.output_summary || finalContent || assistantText || '').trim();
+        const finalAssistantText = buildFriendlyCompletionMessage({
+          rawOutput,
+          runStatus: completedRun?.status ?? run.status,
+          testsPassed,
+          testsTotal: tests.length,
+        });
+        const savedAssistantMessages = await addPlanningMessages(
+          input.request.id,
+          [{
+            role: 'assistant',
+            content: finalAssistantText,
+            metadata: {
+              provider: 'codex_runner',
+              run_id: run.id,
+              plan_id: plan.id,
+            },
+          }],
+          input.userId,
+          input.accessToken,
+        );
+        const assistantMessage = savedAssistantMessages[0];
+        if (!assistantMessage) throw new Error('Coding agent output could not be saved.');
+
+        writeEvent({
+          type: 'done',
+          payload: {
+            userMessage,
+            assistantMessage,
+            run: completedRun ?? run,
+            plan,
+          },
+        });
+        controller.close();
+      })().catch((error) => {
+        writeEvent({
+          type: 'error',
+          error: publicImplementationError(error),
         });
         controller.close();
       });
@@ -272,7 +495,7 @@ function buildImplementationPlan(request: ChangeRequest) {
     '4. Implement additive persistence for the requested workflow and audit trail; do not drop or rewrite existing CRM tables.',
     '5. Enforce the workflow in the backend path that mutates production state, not only in frontend UI.',
     '6. Add the smallest clear UI to explain the requirement, collect the missing decision, and show persisted status.',
-    '7. Deploy a preview, run smoke tests, and show diff/test/preview evidence in developer review before merge.',
+    '7. Deploy a preview, run smoke tests, then automatically merge, deploy, enable the company flag, and notify the requester.',
   ].join('\n');
 }
 
@@ -314,6 +537,45 @@ function buildCodingAgentPrompt(
     '- Add a focused UI using existing components and design conventions.',
     '- Return exact changed files, schema changes, smoke test results, preview URL, and review notes.',
   ].join('\n');
+}
+
+function formatPlanForChat(plan: ChangeRequestPlan) {
+  return [
+    'Draft plan',
+    '',
+    plan.summary,
+    '',
+    'Implementation plan',
+    plan.implementation_plan,
+    '',
+    'Acceptance criteria',
+    ...plan.acceptance_criteria.map((criterion) => `- ${criterion}`),
+  ].join('\n');
+}
+
+export async function addDraftedPlanMessage(input: {
+  requestId: string;
+  plan: ChangeRequestPlan;
+  userId: string;
+  accessToken: string;
+}) {
+  const savedMessages = await addPlanningMessages(
+    input.requestId,
+    [{
+      role: 'assistant',
+      content: formatPlanForChat(input.plan),
+      metadata: {
+        kind: 'drafted_plan',
+        plan_id: input.plan.id,
+      },
+    }],
+    input.userId,
+    input.accessToken,
+  );
+
+  const message = savedMessages[0];
+  if (!message) throw new Error('Draft plan message could not be saved.');
+  return message;
 }
 
 export async function draftChangeRequestPlan(input: {

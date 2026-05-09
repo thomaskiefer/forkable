@@ -14,6 +14,9 @@ import type {
   ScheduledAgentTask,
   ScheduledAgentTaskType,
   ScheduledAgentTaskStatus,
+  UserNotification,
+  UserNotificationKind,
+  UserNotificationSourceType,
 } from '@/lib/types';
 
 type InsforgeClient = ReturnType<typeof createInsforgeServerClient>;
@@ -32,6 +35,14 @@ function assertNoDatabaseError(
   if (error) {
     throw new Error(error.message ?? fallbackMessage);
   }
+}
+
+function isMissingNotificationsTable(error: { message?: string } | null) {
+  const message = error?.message ?? '';
+  return (
+    message.includes('user_notifications') &&
+    (message.includes('does not exist') || message.includes('not found'))
+  );
 }
 
 // ============================================================
@@ -719,6 +730,19 @@ export async function createChangeRequest(
   return (data?.[0] ?? null) as ChangeRequest | null;
 }
 
+export async function deleteChangeRequest(
+  id: string,
+  accessToken?: string | null,
+) {
+  const insforge = getInsforge(accessToken);
+  const { error } = await insforge.database
+    .from('change_requests')
+    .delete()
+    .eq('id', id);
+
+  assertNoDatabaseError(error, 'Unable to delete feature request.');
+}
+
 export async function getAgentRunsForRequest(
   changeRequestId: string,
   accessToken?: string | null,
@@ -744,6 +768,136 @@ export async function getAgentRun(id: string, accessToken?: string | null) {
 
   assertNoDatabaseError(error, 'Unable to load agent run.');
   return data;
+}
+
+export async function listUserNotifications(
+  accessToken?: string | null,
+  options?: { includeArchived?: boolean; limit?: number },
+) {
+  const insforge = getInsforge(accessToken);
+  let query = insforge.database
+    .from('user_notifications')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (!options?.includeArchived) {
+    query = query.neq('status', 'archived');
+  }
+
+  if (options?.limit) {
+    query = query.range(0, options.limit - 1);
+  }
+
+  const { data, error } = await query;
+  if (isMissingNotificationsTable(error)) return [];
+  assertNoDatabaseError(error, 'Unable to load notifications.');
+  return (data ?? []) as UserNotification[];
+}
+
+export async function getUnreadNotificationCount(accessToken?: string | null) {
+  const insforge = getInsforge(accessToken);
+  const { data, error } = await insforge.database
+    .from('user_notifications')
+    .select('id')
+    .eq('status', 'unread');
+
+  if (isMissingNotificationsTable(error)) return 0;
+  assertNoDatabaseError(error, 'Unable to load unread notification count.');
+  return (data ?? []).length;
+}
+
+export async function createUserNotification(
+  input: {
+    title: string;
+    body?: string;
+    kind?: UserNotificationKind;
+    sourceType?: UserNotificationSourceType;
+    source_type?: UserNotificationSourceType;
+    actionLabel?: string | null;
+    action_label?: string | null;
+    actionHref?: string | null;
+    action_href?: string | null;
+    scheduledTaskId?: string | null;
+    scheduled_task_id?: string | null;
+    scheduledExecutionId?: string | null;
+    scheduled_execution_id?: string | null;
+    changeRequestId?: string | null;
+    change_request_id?: string | null;
+    planId?: string | null;
+    plan_id?: string | null;
+    agentRunId?: string | null;
+    agent_run_id?: string | null;
+    metadata?: Record<string, unknown>;
+    userId: string;
+    user_id?: string;
+  },
+  accessToken?: string | null,
+) {
+  const insforge = getInsforge(accessToken);
+  const { data, error } = await insforge.database
+    .from('user_notifications')
+    .insert([{
+      title: input.title,
+      body: input.body ?? '',
+      kind: input.kind ?? 'info',
+      source_type: input.sourceType ?? input.source_type ?? 'system',
+      action_label: input.actionLabel ?? input.action_label ?? null,
+      action_href: input.actionHref ?? input.action_href ?? null,
+      scheduled_task_id: input.scheduledTaskId ?? input.scheduled_task_id ?? null,
+      scheduled_execution_id: input.scheduledExecutionId ?? input.scheduled_execution_id ?? null,
+      change_request_id: input.changeRequestId ?? input.change_request_id ?? null,
+      plan_id: input.planId ?? input.plan_id ?? null,
+      agent_run_id: input.agentRunId ?? input.agent_run_id ?? null,
+      metadata: input.metadata ?? {},
+      user_id: input.userId ?? input.user_id,
+    }])
+    .select('*');
+
+  if (isMissingNotificationsTable(error)) return null;
+  assertNoDatabaseError(error, 'Unable to create notification.');
+  return (data?.[0] ?? null) as UserNotification | null;
+}
+
+export async function markNotificationRead(
+  id: string,
+  accessToken?: string | null,
+) {
+  const now = new Date().toISOString();
+  const insforge = getInsforge(accessToken);
+  const { data, error } = await insforge.database
+    .from('user_notifications')
+    .update({
+      status: 'read',
+      read_at: now,
+      updated_at: now,
+    })
+    .eq('id', id)
+    .select('*');
+
+  if (isMissingNotificationsTable(error)) return null;
+  assertNoDatabaseError(error, 'Unable to mark notification read.');
+  return (data?.[0] ?? null) as UserNotification | null;
+}
+
+export async function archiveNotification(
+  id: string,
+  accessToken?: string | null,
+) {
+  const now = new Date().toISOString();
+  const insforge = getInsforge(accessToken);
+  const { data, error } = await insforge.database
+    .from('user_notifications')
+    .update({
+      status: 'archived',
+      archived_at: now,
+      updated_at: now,
+    })
+    .eq('id', id)
+    .select('*');
+
+  if (isMissingNotificationsTable(error)) return null;
+  assertNoDatabaseError(error, 'Unable to archive notification.');
+  return (data?.[0] ?? null) as UserNotification | null;
 }
 
 export async function getAgentSteps(runId: string, accessToken?: string | null) {
@@ -1163,6 +1317,19 @@ export async function updateScheduledAgentTask(
   return (data?.[0] ?? null) as ScheduledAgentTask | null;
 }
 
+export async function deleteScheduledAgentTask(
+  id: string,
+  accessToken?: string | null,
+) {
+  const insforge = getInsforge(accessToken);
+  const { error } = await insforge.database
+    .from('scheduled_agent_tasks')
+    .delete()
+    .eq('id', id);
+
+  assertNoDatabaseError(error, 'Unable to delete scheduled agent task.');
+}
+
 export async function addScheduledAgentMessages(
   taskId: string,
   messages: Array<{
@@ -1304,40 +1471,45 @@ export async function createQueuedAgentRunFromPlan(
   const run = (data?.[0] ?? null) as AgentRun | null;
   if (!run) throw new Error('The coding agent run was not created.');
 
-  const steps = [
-    'Load finalized planning chat and context bundle',
-    'Use Nia to inspect repo, migrations, RLS, and UI patterns',
-    `Create Git branch feat/${branchPart}`,
-    `Create InsForge backend branch ${branchPart}`,
-    'Implement additive schema and backend enforcement',
-    'Update feature-gated CRM UI',
-    'Deploy preview and run smoke tests',
-    'Prepare developer review package',
-  ].map((label, index) => ({
-    run_id: run.id,
-    order_index: index + 1,
-    label,
-    status: index === 0 ? 'running' : 'pending',
-    details: index === 0 ? plan.summary : null,
-    user_id: userId,
-  }));
+  try {
+    const steps = [
+      'Load finalized planning chat and context bundle',
+      'Use Nia to inspect repo, migrations, RLS, and UI patterns',
+      `Create Git branch feat/${branchPart}`,
+      `Create InsForge backend branch ${branchPart}`,
+      'Implement additive schema and backend enforcement',
+      'Update feature-gated CRM UI',
+      'Deploy preview and run smoke tests',
+      'Merge, deploy, enable company flag, and notify requester',
+    ].map((label, index) => ({
+      run_id: run.id,
+      order_index: index + 1,
+      label,
+      status: index === 0 ? 'running' : 'pending',
+      details: index === 0 ? plan.summary : null,
+      user_id: userId,
+    }));
 
-  const { error: stepsError } = await insforge.database
-    .from('agent_steps')
-    .insert(steps);
+    const { error: stepsError } = await insforge.database
+      .from('agent_steps')
+      .insert(steps);
 
-  assertNoDatabaseError(stepsError, 'Unable to create agent steps.');
+    assertNoDatabaseError(stepsError, 'Unable to create agent steps.');
 
-  const { error: planError } = await insforge.database
-    .from('change_request_plans')
-    .update({
-      status: 'sent_to_agent',
-      sent_to_agent_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', plan.id);
+    const { error: planError } = await insforge.database
+      .from('change_request_plans')
+      .update({
+        status: 'sent_to_agent',
+        sent_to_agent_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', plan.id);
 
-  assertNoDatabaseError(planError, 'Unable to mark plan as sent.');
+    assertNoDatabaseError(planError, 'Unable to mark plan as sent.');
+  } catch (error) {
+    await insforge.database.from('agent_runs').delete().eq('id', run.id);
+    throw error;
+  }
 
   return run;
 }
@@ -1441,53 +1613,58 @@ export async function createQueuedAgentRunFromScheduledExecution(
   const run = (data?.[0] ?? null) as AgentRun | null;
   if (!run) throw new Error('The scheduled coding agent run was not created.');
 
-  const steps = [
-    'Load scheduled task, finalized plan, and context bundle',
-    'Use Nia to inspect repo, migrations, RLS, and UI patterns',
-    `Create Git branch feat/${branchPart}`,
-    `Create InsForge backend branch ${branchPart}`,
-    'Implement additive changes requested by the scheduled task',
-    'Run relevant smoke tests',
-    'Prepare developer review package',
-  ].map((label, index) => ({
-    run_id: run.id,
-    order_index: index + 1,
-    label,
-    status: index === 0 ? 'running' : 'pending',
-    details: index === 0 ? task.title : null,
-    user_id: userId,
-  }));
+  try {
+    const steps = [
+      'Load scheduled task, finalized plan, and context bundle',
+      'Use Nia to inspect repo, migrations, RLS, and UI patterns',
+      `Create Git branch feat/${branchPart}`,
+      `Create InsForge backend branch ${branchPart}`,
+      'Implement additive changes requested by the scheduled task',
+      'Deploy preview and run smoke tests',
+      'Merge, deploy, enable company flag, and notify requester',
+    ].map((label, index) => ({
+      run_id: run.id,
+      order_index: index + 1,
+      label,
+      status: index === 0 ? 'running' : 'pending',
+      details: index === 0 ? task.title : null,
+      user_id: userId,
+    }));
 
-  const { error: stepsError } = await insforge.database
-    .from('agent_steps')
-    .insert(steps);
+    const { error: stepsError } = await insforge.database
+      .from('agent_steps')
+      .insert(steps);
 
-  assertNoDatabaseError(stepsError, 'Unable to create scheduled agent steps.');
+    assertNoDatabaseError(stepsError, 'Unable to create scheduled agent steps.');
 
-  const now = new Date().toISOString();
-  const { error: executionError } = await insforge.database
-    .from('scheduled_agent_executions')
-    .update({
-      agent_run_id: run.id,
-      change_request_id: request.id,
-      plan_id: plan.id,
-      status: 'running',
-      started_at: now,
-      updated_at: now,
-    })
-    .eq('id', execution.id);
+    const now = new Date().toISOString();
+    const { error: executionError } = await insforge.database
+      .from('scheduled_agent_executions')
+      .update({
+        agent_run_id: run.id,
+        change_request_id: request.id,
+        plan_id: plan.id,
+        status: 'running',
+        started_at: now,
+        updated_at: now,
+      })
+      .eq('id', execution.id);
 
-  assertNoDatabaseError(executionError, 'Unable to link scheduled execution.');
+    assertNoDatabaseError(executionError, 'Unable to link scheduled execution.');
 
-  const { error: taskError } = await insforge.database
-    .from('scheduled_agent_tasks')
-    .update({
-      last_run_at: now,
-      updated_at: now,
-    })
-    .eq('id', task.id);
+    const { error: taskError } = await insforge.database
+      .from('scheduled_agent_tasks')
+      .update({
+        last_run_at: now,
+        updated_at: now,
+      })
+      .eq('id', task.id);
 
-  assertNoDatabaseError(taskError, 'Unable to update scheduled agent task.');
+    assertNoDatabaseError(taskError, 'Unable to update scheduled agent task.');
+  } catch (error) {
+    await insforge.database.from('agent_runs').delete().eq('id', run.id);
+    throw error;
+  }
 
   return run;
 }

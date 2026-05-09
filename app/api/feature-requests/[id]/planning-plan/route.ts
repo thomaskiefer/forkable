@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getAuthenticatedSession } from '@/lib/auth-state';
-import { draftChangeRequestPlan } from '@/lib/feature-planning';
+import { addDraftedPlanMessage, draftChangeRequestPlan } from '@/lib/feature-planning';
 import { getChangeRequest } from '@/lib/queries';
 import type { ChangeRequest, ChangeRequestPlan } from '@/lib/types';
 
@@ -29,6 +29,12 @@ export async function POST(
     accessToken,
     status: body.status ?? 'finalized',
   });
+  const message = await addDraftedPlanMessage({
+    requestId: changeRequest.id,
+    plan,
+    userId: viewer.id,
+    accessToken,
+  });
 
-  return NextResponse.json({ plan });
+  return NextResponse.json({ plan, message });
 }

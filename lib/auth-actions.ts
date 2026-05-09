@@ -1,11 +1,189 @@
 'use server';
 
+import type { UserSchema } from '@insforge/sdk';
 import { redirect } from 'next/navigation';
 import { getAppUrl } from '@/lib/app-url';
 import { clearAuthCookies, consumePkceVerifier, setAuthCookies, setPkceVerifier } from '@/lib/auth-cookies';
-import { getInsforgeServerClient } from '@/lib/insforge';
+import { createInsforgeServerClient, getInsforgeServerClient } from '@/lib/insforge';
 
 type AuthResult = { success: true } | { success: false; error: string };
+type CompanyEnsureResult = { success: true } | { success: false; error: string };
+
+const PERSONAL_EMAIL_DOMAINS = new Set([
+  'aol.com',
+  'icloud.com',
+  'gmail.com',
+  'hotmail.com',
+  'live.com',
+  'me.com',
+  'msn.com',
+  'outlook.com',
+  'proton.me',
+  'protonmail.com',
+  'yahoo.com',
+]);
+
+function getDatabaseErrorMessage(error: unknown, fallback: string) {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+
+  return fallback;
+}
+
+function slugifyCompanyName(value: string) {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/g, '');
+
+  return slug || 'company';
+}
+
+function titleizeDomainLabel(label: string) {
+  return label
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function inferCompanyName(user: UserSchema) {
+  const email = user.email.trim().toLowerCase();
+  const domain = email.split('@')[1] ?? '';
+  const domainLabel = domain.split('.')[0] ?? '';
+
+  if (domain && !PERSONAL_EMAIL_DOMAINS.has(domain) && domainLabel) {
+    return `${titleizeDomainLabel(domainLabel)} Company`;
+  }
+
+  const profileName = user.profile?.name?.trim();
+  if (profileName) {
+    return `${profileName} Company`;
+  }
+
+  const emailName = email.split('@')[0]?.replace(/[._-]+/g, ' ').trim();
+  if (emailName) {
+    return `${titleizeDomainLabel(emailName)} Company`;
+  }
+
+  return 'My Company';
+}
+
+async function ensureUserCompanyAccount(
+  user: UserSchema | null | undefined,
+  accessToken: string | null | undefined,
+): Promise<CompanyEnsureResult> {
+  const userId = user?.id;
+  const email = user?.email?.trim().toLowerCase();
+
+  if (!userId || !email || !accessToken) {
+    return { success: false, error: 'Unable to create your company workspace.' };
+  }
+
+  const insforge = createInsforgeServerClient({ accessToken });
+  const { data: existingMembers, error: existingMemberError } = await insforge.database
+    .from('company_account_members')
+    .select('company_account_id')
+    .eq('user_id', userId)
+    .eq('email', email)
+    .range(0, 0);
+
+  if (existingMemberError) {
+    return {
+      success: false,
+      error: getDatabaseErrorMessage(existingMemberError, 'Unable to load company membership.'),
+    };
+  }
+
+  if (Array.isArray(existingMembers) && existingMembers[0]?.company_account_id) {
+    return { success: true };
+  }
+
+  const companyName = inferCompanyName(user);
+  const companySlug = slugifyCompanyName(companyName);
+  const emailDomain = email.split('@')[1] || null;
+  const fullName = user.profile?.name?.trim() || email.split('@')[0] || 'Workspace member';
+
+  const { data: existingAccounts, error: existingAccountError } = await insforge.database
+    .from('company_accounts')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('slug', companySlug)
+    .range(0, 0);
+
+  if (existingAccountError) {
+    return {
+      success: false,
+      error: getDatabaseErrorMessage(existingAccountError, 'Unable to load company workspace.'),
+    };
+  }
+
+  let companyAccount = Array.isArray(existingAccounts) ? existingAccounts[0] : null;
+
+  if (!companyAccount) {
+    const { data: createdAccounts, error: createAccountError } = await insforge.database
+      .from('company_accounts')
+      .insert([{
+        name: companyName,
+        slug: companySlug,
+        domain: emailDomain,
+        user_id: userId,
+      }])
+      .select('*');
+
+    if (createAccountError) {
+      return {
+        success: false,
+        error: getDatabaseErrorMessage(createAccountError, 'Unable to create company workspace.'),
+      };
+    }
+
+    companyAccount = Array.isArray(createdAccounts) ? createdAccounts[0] : null;
+  }
+
+  if (!companyAccount?.id) {
+    return { success: false, error: 'Unable to create company workspace.' };
+  }
+
+  const { error: createMemberError } = await insforge.database
+    .from('company_account_members')
+    .insert([{
+      company_account_id: companyAccount.id,
+      email,
+      full_name: fullName,
+      account_role: 'Owner',
+      user_id: userId,
+    }]);
+
+  if (createMemberError) {
+    const { data: restoredMembers, error: restoredMemberError } = await insforge.database
+      .from('company_account_members')
+      .select('company_account_id')
+      .eq('user_id', userId)
+      .eq('email', email)
+      .range(0, 0);
+
+    if (!restoredMemberError && Array.isArray(restoredMembers) && restoredMembers[0]?.company_account_id) {
+      return { success: true };
+    }
+
+    return {
+      success: false,
+      error: getDatabaseErrorMessage(createMemberError, 'Unable to create company membership.'),
+    };
+  }
+
+  return { success: true };
+}
 
 export async function getAuthConfig() {
   const baseUrl = process.env.NEXT_PUBLIC_INSFORGE_URL!;
@@ -39,6 +217,11 @@ export async function signIn(email: string, password: string): Promise<AuthResul
     return { success: false, error: 'Sign in failed.' };
   }
 
+  const companyResult = await ensureUserCompanyAccount(data.user, data.accessToken);
+  if (!companyResult.success) {
+    return { success: false, error: companyResult.error };
+  }
+
   await setAuthCookies(data.accessToken, data.refreshToken);
   return { success: true };
 }
@@ -60,6 +243,11 @@ export async function signUp(
   }
 
   if (data?.accessToken && data?.refreshToken) {
+    const companyResult = await ensureUserCompanyAccount(data.user, data.accessToken);
+    if (!companyResult.success) {
+      return { success: false, error: companyResult.error };
+    }
+
     await setAuthCookies(data.accessToken, data.refreshToken);
     return { success: true, requireVerification: false };
   }
@@ -76,6 +264,11 @@ export async function verifyEmail(email: string, otp: string): Promise<AuthResul
   }
 
   if (data?.accessToken && data?.refreshToken) {
+    const companyResult = await ensureUserCompanyAccount(data.user, data.accessToken);
+    if (!companyResult.success) {
+      return { success: false, error: companyResult.error };
+    }
+
     await setAuthCookies(data.accessToken, data.refreshToken);
   }
 
@@ -161,6 +354,11 @@ export async function exchangeAuthCode(code: string): Promise<AuthResult> {
   }
 
   if (data.refreshToken) {
+    const companyResult = await ensureUserCompanyAccount(data.user, data.accessToken);
+    if (!companyResult.success) {
+      return { success: false, error: companyResult.error };
+    }
+
     await setAuthCookies(data.accessToken, data.refreshToken);
   }
 

@@ -386,13 +386,52 @@ export interface ScheduledAgentExecution {
   updated_at: string;
 }
 
+export type UserNotificationKind = 'info' | 'success' | 'warning' | 'error';
+export type UserNotificationSourceType =
+  | 'system'
+  | 'scheduled_agent'
+  | 'agent_run'
+  | 'feature_request';
+export type UserNotificationStatus = 'unread' | 'read' | 'archived';
+
+export interface UserNotification {
+  id: string;
+  title: string;
+  body: string;
+  kind: UserNotificationKind;
+  source_type: UserNotificationSourceType;
+  status: UserNotificationStatus;
+  action_label?: string;
+  action_href?: string;
+  scheduled_task_id?: string;
+  scheduled_execution_id?: string;
+  change_request_id?: string;
+  plan_id?: string;
+  agent_run_id?: string;
+  metadata: Record<string, unknown>;
+  read_at?: string;
+  archived_at?: string;
+  user_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export type FeaturePlanningStreamEvent =
   | { type: 'delta'; content: string }
+  | { type: 'status'; message: string }
+  | {
+      type: 'message';
+      payload: {
+        message: ChangeRequestPlanningMessage;
+      };
+    }
   | {
       type: 'done';
       payload: {
-        userMessage: ChangeRequestPlanningMessage;
+        userMessage: ChangeRequestPlanningMessage | null;
         assistantMessage: ChangeRequestPlanningMessage;
+        run?: AgentRun;
+        plan?: ChangeRequestPlan;
       };
     }
   | { type: 'warning'; message: string }

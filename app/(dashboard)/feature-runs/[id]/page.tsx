@@ -97,7 +97,7 @@ export default async function RunDetailPage({
                 ) : null}
               </div>
               <Link href={`/feature-reviews/${run.id}`}>
-                <Button className="w-full">Open feature review</Button>
+                <Button className="w-full">Open shipment details</Button>
               </Link>
             </CardContent>
           </Card>

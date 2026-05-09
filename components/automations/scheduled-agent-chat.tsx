@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { CalendarClock, Loader2, Pause, Play, Send, Wand2, Zap } from 'lucide-react';
+import { CalendarClock, Loader2, Pause, Play, Send, Zap } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -43,7 +43,7 @@ function taskDescription(task: TaskRecord) {
 }
 
 function taskSchedule(task: TaskRecord) {
-  return taskString(task, ['schedule_label', 'schedule', 'cron_expression', 'rrule'], 'No schedule drafted');
+  return taskString(task, ['schedule_label', 'schedule', 'cron_expression', 'rrule'], 'Describe a schedule');
 }
 
 function executionStatus(execution?: ScheduledAgentExecution | null) {
@@ -143,7 +143,11 @@ export function ScheduledAgentChat({
       });
 
       if (!response.ok) throw new Error(await getErrorMessage(response));
-      const body = (await response.json()) as { messages: ScheduledAgentMessage[] };
+      const body = (await response.json()) as {
+        messages: ScheduledAgentMessage[];
+        task?: ScheduledAgentTask;
+      };
+      if (body.task) setCurrentTask(body.task as TaskRecord);
       setMessages((current) => [
         ...current.filter((message) => message.id !== userMessage.id),
         ...body.messages,
@@ -208,7 +212,7 @@ export function ScheduledAgentChat({
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            Describe what the agent should do and when it should run.
+            Describe the automation in one sentence. The agent will set up the schedule for you.
           </p>
         ) : (
           messages.map((message) => <MessageBubble key={message.id} message={message} />)
@@ -221,6 +225,12 @@ export function ScheduledAgentChat({
           onSubmit={(event) => {
             event.preventDefault();
             void sendMessage(input);
+          }}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+              event.preventDefault();
+              event.currentTarget.requestSubmit();
+            }
           }}
         >
           <Textarea
@@ -235,15 +245,6 @@ export function ScheduledAgentChat({
               Latest run: {executionStatus(latestExecution)}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => postTaskAction('draft', 'Schedule drafted.')}
-                disabled={Boolean(busyAction)}
-              >
-                {busyAction === 'draft' ? <Loader2 className="animate-spin" /> : <Wand2 />}
-                Draft schedule
-              </Button>
               <Button
                 type="button"
                 variant="outline"
@@ -265,14 +266,14 @@ export function ScheduledAgentChat({
                 type="button"
                 variant="outline"
                 onClick={() => postTaskAction('run-now', 'Run requested.')}
-                disabled={Boolean(busyAction)}
+                disabled={Boolean(busyAction) || !isActive}
               >
                 {busyAction === 'run-now' ? <Loader2 className="animate-spin" /> : <Zap />}
                 Run now
               </Button>
               <Button type="submit" disabled={!input.trim() || Boolean(busyAction)}>
                 {busyAction === 'message' ? <Loader2 className="animate-spin" /> : <Send />}
-                Send
+                {status === 'draft' ? 'Set up' : 'Send'}
               </Button>
             </div>
           </div>

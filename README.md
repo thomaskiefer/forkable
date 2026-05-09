@@ -16,7 +16,7 @@ forcing every customer workflow through a generic process.
 - Customize fields, stages, qualification rules, approval gates, and dashboards.
 - Build customer-specific behavior on a branch before it reaches production.
 - Preview changes against isolated backend data.
-- Run smoke tests and developer review before merge.
+- Run smoke tests, then merge, deploy, and notify the requester automatically.
 - Ship custom behavior behind account-level feature flags.
 
 ## Demo Flow
@@ -69,12 +69,12 @@ npx @insforge/cli db import migrations/20260509182053_forkable-approval-gate.sql
 npx @insforge/cli db import migrations/20260509183048_crm-storage-policies.sql
 npx @insforge/cli db import migrations/20260509190000_feature-planning-chat.sql
 npx @insforge/cli db import migrations/20260509193000_agent-runner.sql
-npx @insforge/cli db import migrations/20260509200000_richer_two_company_demo.sql
-npx @insforge/cli db import migrations/20260509201000_customer_scoped_feature_flags.sql
-npx @insforge/cli db import migrations/20260509212000_realistic_company_team_demo.sql
+npx @insforge/cli db import migrations/20260509200000_richer-two-company-demo.sql
+npx @insforge/cli db import migrations/20260509201000_customer-scoped-feature-flags.sql
+npx @insforge/cli db import migrations/20260509212000_realistic-company-team-demo.sql
 npx @insforge/cli db import migrations/20260509213000_scheduled-agent-tasks.sql
-npx @insforge/cli db import migrations/20260509214000_remove_project_codes.sql
-npx @insforge/cli db import migrations/20260509220000_company_scoped_flags.sql
+npx @insforge/cli db import migrations/20260509214000_remove-project-codes.sql
+npx @insforge/cli db import migrations/20260509220000_company-scoped-flags.sql
 ```
 
 Run the app:

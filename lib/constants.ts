@@ -1,5 +1,4 @@
 export const UPLOAD_BUCKET = 'lead-documents';
-export const DEFAULT_AI_MODEL = 'openai/gpt-4o-mini';
 export const DEFAULT_LANDING_ROUTE = '/dashboard';
 export const DEFAULT_ITEMS_PER_PAGE = 10;
 export const ITEMS_PER_PAGE_OPTIONS = [10, 25, 50, 100];

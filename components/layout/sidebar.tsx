@@ -2,7 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import {
+  Bell,
   CalendarClock,
   LayoutDashboard,
   Target,
@@ -27,6 +29,7 @@ const navItems = [
   { href: '/projects', label: 'Projects', icon: Briefcase },
   { href: '/feature-requests', label: 'Feature requests', icon: GitPullRequestArrow },
   { href: '/automations', label: 'Automations', icon: CalendarClock },
+  { href: '/notifications', label: 'Notifications', icon: Bell },
 ];
 
 function matchesRoute(pathname: string, href: string) {
@@ -43,6 +46,32 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const activeHref = getActiveHref(pathname);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadUnreadNotifications() {
+      try {
+        const response = await fetch('/api/notifications/unread-count', {
+          cache: 'no-store',
+        });
+        if (!response.ok) return;
+        const body = (await response.json()) as { count?: number };
+        if (!cancelled) setUnreadNotifications(Math.max(0, body.count ?? 0));
+      } catch {
+        if (!cancelled) setUnreadNotifications(0);
+      }
+    }
+
+    void loadUnreadNotifications();
+    const intervalId = globalThis.setInterval(loadUnreadNotifications, 30000);
+
+    return () => {
+      cancelled = true;
+      globalThis.clearInterval(intervalId);
+    };
+  }, [pathname]);
 
   function prefetchRoute(href: string) {
     if (dashboardPrefetchRoutes.includes(href)) {
@@ -90,6 +119,11 @@ export function Sidebar() {
                 )}
               />
               <span className="truncate">{item.label}</span>
+              {item.href === '/notifications' && unreadNotifications > 0 ? (
+                <span className="ml-auto inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[0.68rem] font-semibold leading-none text-primary-foreground">
+                  {unreadNotifications > 99 ? '99+' : unreadNotifications}
+                </span>
+              ) : null}
             </Link>
           );
         })}

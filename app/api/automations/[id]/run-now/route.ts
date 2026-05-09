@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAuthenticatedSession } from '@/lib/auth-state';
 import { getScheduledAgentTask } from '@/lib/queries';
+import { normalizeRunnerUrl, runnerEndpointUrl, runnerRequestError } from '@/lib/runner-url';
 
 export async function POST(
   _request: Request,
@@ -18,7 +19,14 @@ export async function POST(
     return NextResponse.json({ error: 'Automation not found.' }, { status: 404 });
   }
 
-  const runnerUrl = process.env.FORKABLE_AGENT_RUNNER_URL;
+  if (task.status !== 'active') {
+    return NextResponse.json(
+      { error: 'Activate this automation before running it.' },
+      { status: 400 },
+    );
+  }
+
+  const runnerUrl = normalizeRunnerUrl(process.env.FORKABLE_AGENT_RUNNER_URL);
   const webhookSecret = process.env.FORKABLE_RUNNER_WEBHOOK_SECRET;
   if (!runnerUrl || !webhookSecret) {
     return NextResponse.json(
@@ -30,17 +38,15 @@ export async function POST(
     );
   }
 
-  const response = await fetch(
-    `${runnerUrl.replace(/\/$/, '')}/scheduled-tasks/${id}/run-now`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${webhookSecret}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ requestedBy: viewer.id }),
+  const endpoint = `/scheduled-tasks/${id}/run-now`;
+  const response = await fetch(runnerEndpointUrl(runnerUrl, endpoint), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${webhookSecret}`,
+      'Content-Type': 'application/json',
     },
-  );
+    body: JSON.stringify({ requestedBy: viewer.id }),
+  });
 
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -48,7 +54,7 @@ export async function POST(
       {
         error:
           typeof body.error === 'string'
-            ? body.error
+            ? runnerRequestError(endpoint, response.status, body.error)
             : 'Runner rejected the run-now request.',
       },
       { status: response.status },

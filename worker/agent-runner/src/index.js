@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import {
   chmod,
   copyFile,
@@ -27,10 +28,12 @@ const config = {
   repoSubdir: process.env.FORKABLE_TARGET_REPO_SUBDIR || '',
   workdir: process.env.FORKABLE_WORKDIR || path.join(process.cwd(), '.forkable-agent-runs'),
   codexHome: process.env.FORKABLE_CODEX_HOME || path.join(process.cwd(), '.forkable-codex-home'),
-  pushBranch: process.env.FORKABLE_PUSH_BRANCH === 'true',
+  pushBranch: process.env.FORKABLE_PUSH_BRANCH !== 'false',
+  autoMerge: process.env.FORKABLE_AUTO_MERGE !== 'false',
   createBackendBranch: process.env.FORKABLE_CREATE_BACKEND_BRANCH === 'true',
   requireBackendBranch: process.env.FORKABLE_REQUIRE_BACKEND_BRANCH === 'true',
   deployPreview: process.env.FORKABLE_DEPLOY_PREVIEW === 'true',
+  deployProduction: process.env.FORKABLE_DEPLOY_PRODUCTION !== 'false',
   codexModel: process.env.CODEX_MODEL || 'gpt-5.5',
   codexReasoningEffort: process.env.CODEX_REASONING_EFFORT || 'low',
   checks: parseCommandList(process.env.FORKABLE_CHECK_COMMANDS || ''),
@@ -130,6 +133,17 @@ function startHealthServer() {
       return;
     }
 
+    const runStreamMatch = url.pathname.match(/^\/agent-runs\/([^/]+)\/stream$/);
+    if (runStreamMatch && request.method === 'POST') {
+      if (!isAuthorized(request)) {
+        sendJson(response, 401, { error: 'Unauthorized' });
+        return;
+      }
+
+      await streamAgentRun(runStreamMatch[1], response);
+      return;
+    }
+
     if (url.pathname === '/planning-chat' && request.method === 'POST') {
       if (!isAuthorized(request)) {
         sendJson(response, 401, { error: 'Unauthorized' });
@@ -138,11 +152,54 @@ function startHealthServer() {
 
       try {
         const body = await readJsonBody(request);
-        const content = await runCodexPlanningChat(body);
-        sendJson(response, 200, { content, model: config.codexModel });
+        if (request.headers.accept?.includes('application/x-ndjson')) {
+          response.writeHead(200, {
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'Content-Type': 'application/x-ndjson; charset=utf-8',
+          });
+
+          const writeEvent = (event) => {
+            response.write(`${JSON.stringify(event)}\n`);
+          };
+
+          const content = await runCodexPlanningChat(body, {
+            onDelta: (content) => writeEvent({ type: 'delta', content }),
+            onStatus: (message) => writeEvent({ type: 'status', message }),
+          });
+
+          writeEvent({ type: 'done', content, model: config.codexModel });
+          response.end();
+        } else {
+          const content = await runCodexPlanningChat(body);
+          sendJson(response, 200, { content, model: config.codexModel });
+        }
       } catch (error) {
         logError(error, { source: 'planning-chat' });
-        sendJson(response, 500, { error: formatError(error) });
+        const publicError = formatPlanningChatError(error);
+        if (response.headersSent) {
+          response.write(`${JSON.stringify({ type: 'error', error: publicError })}\n`);
+          response.end();
+        } else {
+          sendJson(response, 500, { error: publicError });
+        }
+      }
+      return;
+    }
+
+    if (url.pathname === '/automation-setup' && request.method === 'POST') {
+      if (!isAuthorized(request)) {
+        sendJson(response, 401, { error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const body = await readJsonBody(request);
+        const setup = await runCodexAutomationSetup(body);
+        sendJson(response, 200, { setup, model: config.codexModel });
+      } catch (error) {
+        logError(error, { source: 'automation-setup' });
+        sendJson(response, 500, { error: formatPlanningChatError(error) });
       }
       return;
     }
@@ -166,9 +223,26 @@ function startHealthServer() {
         return;
       }
 
-      processScheduledTaskRunNow(decodeURIComponent(runNowMatch[1]))
-        .catch((error) => logError(error, { source: 'scheduled-task-run-now', taskId: runNowMatch[1] }));
-      sendJson(response, 202, { accepted: true, taskId: decodeURIComponent(runNowMatch[1]) });
+      try {
+        const taskId = decodeURIComponent(runNowMatch[1]);
+        const body = await readJsonBody(request).catch(() => ({}));
+        const task = await claimScheduledTaskById(taskId);
+        if (!task) {
+          sendJson(response, 409, {
+            error: 'Automation is not active, is already running, or could not be claimed.',
+          });
+          return;
+        }
+
+        processScheduledTask(task, {
+          triggerType: 'manual',
+          requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : null,
+        }).catch((error) => logError(error, { source: 'scheduled-task-run-now', taskId }));
+        sendJson(response, 202, { accepted: true, taskId });
+      } catch (error) {
+        logError(error, { source: 'scheduled-task-run-now', taskId: runNowMatch[1] });
+        sendJson(response, 500, { error: formatError(error) });
+      }
       return;
     }
 
@@ -233,6 +307,51 @@ async function processNextRun() {
   }
 }
 
+async function streamAgentRun(runId, response) {
+  if (state.activeRunId) {
+    sendJson(response, 409, { error: `Runner is already processing ${state.activeRunId}.` });
+    return;
+  }
+
+  const run = await claimQueuedRunById(runId);
+  if (!run) {
+    sendJson(response, 404, { error: 'Queued agent run was not found.' });
+    return;
+  }
+
+  state.activeRunId = run.id;
+  state.lastRunAt = new Date().toISOString();
+
+  response.writeHead(200, {
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+  });
+
+  const writeEvent = (event) => {
+    response.write(`${JSON.stringify(event)}\n`);
+  };
+
+  try {
+    writeEvent({ type: 'status', message: 'Runner claimed coding run' });
+    const result = await executeRun(run, {
+      onDelta: (content) => writeEvent({ type: 'delta', content }),
+      onStatus: (message) => writeEvent({ type: 'status', message }),
+    });
+    writeEvent({
+      type: 'done',
+      content: result?.finalMessage || 'Coding agent run finished.',
+      runId: run.id,
+    });
+  } catch (error) {
+    await failRun(run.id, error);
+    writeEvent({ type: 'error', error: formatPlanningChatError(error) });
+  } finally {
+    state.activeRunId = null;
+    response.end();
+  }
+}
+
 async function claimQueuedRun() {
   const { data, error } = await insforge.database
     .from('agent_runs')
@@ -264,6 +383,26 @@ async function claimQueuedRun() {
   return claimed?.[0] || null;
 }
 
+async function claimQueuedRunById(runId) {
+  const now = new Date().toISOString();
+  const { data: claimed, error } = await insforge.database
+    .from('agent_runs')
+    .update({
+      status: 'running',
+      runner_mode: 'insforge_compute',
+      runner_id: runnerId,
+      runner_started_at: now,
+      started_at: now,
+      runner_error: null,
+    })
+    .eq('id', runId)
+    .eq('status', 'queued')
+    .select('*');
+
+  assertDb(error, 'Unable to claim queued agent run.');
+  return claimed?.[0] || null;
+}
+
 async function processScheduledTasksTick() {
   const tasks = await claimDueScheduledTasks();
   for (const task of tasks) {
@@ -274,7 +413,7 @@ async function processScheduledTasksTick() {
 async function processScheduledTaskRunNow(taskId) {
   const task = await claimScheduledTaskById(taskId);
   if (!task) return;
-  await processScheduledTask(task);
+  await processScheduledTask(task, { triggerType: 'manual' });
 }
 
 async function claimDueScheduledTasks() {
@@ -295,12 +434,13 @@ async function claimDueScheduledTasks() {
       .from('scheduled_agent_tasks')
       .update({
         last_run_at: now.toISOString(),
-        next_run_at: nextRunAt.toISOString(),
+        next_run_at: nextRunAt ? nextRunAt.toISOString() : null,
         updated_at: now.toISOString(),
       })
       .eq('id', task.id)
       .eq('status', 'active')
       .eq('next_run_at', task.next_run_at)
+      .eq('updated_at', task.updated_at)
       .select('*');
 
     assertDb(claimError, 'Unable to claim scheduled agent task.');
@@ -320,34 +460,53 @@ async function claimScheduledTaskById(taskId) {
 
   assertDb(error, 'Unable to load scheduled agent task.');
   if (!task) return null;
+  if (await hasRunningScheduledExecution(task.id)) return null;
 
   const nextRunAt = calculateNextRunAt(task, now);
-  const { data: rows, error: claimError } = await insforge.database
+  let claimQuery = insforge.database
     .from('scheduled_agent_tasks')
     .update({
       last_run_at: now.toISOString(),
-      next_run_at: nextRunAt.toISOString(),
+      next_run_at: nextRunAt ? nextRunAt.toISOString() : null,
       updated_at: now.toISOString(),
     })
     .eq('id', task.id)
     .eq('status', 'active')
-    .eq('next_run_at', task.next_run_at)
-    .select('*');
+    .eq('updated_at', task.updated_at);
+
+  claimQuery = task.next_run_at
+    ? claimQuery.eq('next_run_at', task.next_run_at)
+    : claimQuery.is('next_run_at', null);
+
+  const { data: rows, error: claimError } = await claimQuery.select('*');
 
   assertDb(claimError, 'Unable to claim scheduled agent task.');
   return rows?.[0] ? { ...rows[0], claimed_run_at: now.toISOString() } : null;
 }
 
-async function processScheduledTask(task) {
+async function hasRunningScheduledExecution(taskId) {
+  const { data, error } = await insforge.database
+    .from('scheduled_agent_executions')
+    .select('id')
+    .eq('task_id', taskId)
+    .eq('status', 'running')
+    .range(0, 0);
+
+  assertDb(error, 'Unable to check scheduled agent execution state.');
+  return Boolean(data?.[0]);
+}
+
+async function processScheduledTask(task, options = {}) {
   log(`claimed scheduled task ${task.id}`);
-  const execution = await createScheduledExecution(task);
+  const execution = await createScheduledExecution(task, options);
 
   try {
     const evaluation = await evaluateScheduledTask(task);
     let result = { warranted: false, reason: evaluation.summary || 'No work warranted.' };
+    let created = null;
 
-    if (task.task_type === 'monitor_context') {
-      const created = await createScheduledMonitorWork(task, execution, evaluation);
+    if (['monitor_context', 'queue_agent'].includes(task.task_type) && evaluation.warranted) {
+      created = await createScheduledMonitorWork(task, execution, evaluation);
       result = {
         warranted: true,
         reason: `Queued scheduled monitor run ${created.run.id} for change request ${created.request.id}.`,
@@ -360,6 +519,15 @@ async function processScheduledTask(task) {
       result_summary: trimForDb(result.reason),
       updated_at: new Date().toISOString(),
     });
+    await createScheduledTaskNotification(task, execution, {
+      evaluation,
+      result,
+      created,
+    }).catch((notificationError) => logError(notificationError, {
+      source: 'scheduled-task-notification',
+      taskId: task.id,
+      executionId: execution.id,
+    }));
   } catch (error) {
     await updateScheduledExecution(execution.id, {
       status: 'failed',
@@ -368,12 +536,31 @@ async function processScheduledTask(task) {
       error: trimForDb(formatError(error)),
       updated_at: new Date().toISOString(),
     });
+    await createNotification({
+      title: `${task.title || 'Scheduled automation'} failed`,
+      body: trimForDb(formatError(error)),
+      kind: 'error',
+      source_type: 'scheduled_agent',
+      action_label: 'Open automation',
+      action_href: `/automations?task=${task.id}`,
+      scheduled_task_id: task.id,
+      scheduled_execution_id: execution.id,
+      metadata: {
+        runner_id: runnerId,
+        task_type: task.task_type,
+      },
+      user_id: task.user_id,
+    }).catch((notificationError) => logError(notificationError, {
+      source: 'scheduled-task-notification',
+      taskId: task.id,
+    }));
     throw error;
   }
 }
 
-async function createScheduledExecution(task) {
+async function createScheduledExecution(task, options = {}) {
   const now = new Date().toISOString();
+  const triggerType = options.triggerType || 'scheduled';
   const { data, error } = await insforge.database
     .from('scheduled_agent_executions')
     .insert([{
@@ -383,6 +570,10 @@ async function createScheduledExecution(task) {
       started_at: now,
       runner_id: runnerId,
       user_id: task.user_id,
+      metadata: {
+        trigger_type: triggerType,
+        requested_by: options.requestedBy || null,
+      },
     }])
     .select('*');
 
@@ -401,6 +592,74 @@ async function updateScheduledExecution(id, patch) {
   assertDb(error, 'Unable to update scheduled agent execution.');
 }
 
+async function createNotification(record) {
+  const { data, error } = await insforge.database
+    .from('user_notifications')
+    .insert([{
+      title: record.title,
+      body: record.body || '',
+      kind: record.kind || 'info',
+      source_type: record.source_type || 'system',
+      action_label: record.action_label || null,
+      action_href: record.action_href || null,
+      scheduled_task_id: record.scheduled_task_id || null,
+      scheduled_execution_id: record.scheduled_execution_id || null,
+      change_request_id: record.change_request_id || null,
+      plan_id: record.plan_id || null,
+      agent_run_id: record.agent_run_id || null,
+      metadata: record.metadata || {},
+      user_id: record.user_id,
+    }])
+    .select('*');
+
+  if (isMissingOptionalTable(error, 'user_notifications')) return null;
+  assertDb(error, 'Unable to create notification.');
+  return data?.[0] || null;
+}
+
+function isMissingOptionalTable(error, tableName) {
+  const message = String(error?.message || error?.error || '');
+  return (
+    message.includes(tableName) &&
+    (message.includes('does not exist') || message.includes('not found'))
+  );
+}
+
+async function createScheduledTaskNotification(task, execution, details) {
+  const created = details.created;
+  const title = created
+    ? `${task.title || 'Scheduled automation'} queued an agent run`
+    : `${task.title || 'Scheduled automation'} checked context`;
+  const body = created
+    ? [
+        details.evaluation.summary,
+        '',
+        `Queued run ${created.run.id} from scheduled execution ${execution.id}.`,
+      ].join('\n')
+    : details.result.reason;
+
+  await createNotification({
+    title,
+    body: trimForDb(body),
+    kind: created ? 'success' : 'info',
+    source_type: 'scheduled_agent',
+    action_label: created ? 'Review run' : 'Open automation',
+    action_href: created ? `/feature-runs/${created.run.id}` : `/automations?task=${task.id}`,
+    scheduled_task_id: task.id,
+    scheduled_execution_id: execution.id,
+    change_request_id: created?.request?.id || null,
+    plan_id: created?.plan?.id || null,
+    agent_run_id: created?.run?.id || null,
+    metadata: {
+      runner_id: runnerId,
+      task_type: task.task_type,
+      warranted: Boolean(created),
+      context_sources: details.evaluation.raw ? ['codex_scheduled_evaluation'] : ['deterministic_fallback'],
+    },
+    user_id: task.user_id,
+  });
+}
+
 async function evaluateScheduledTask(task) {
   const fallback = buildScheduledEvaluationFallback(task);
   if (getCodexAuthMode() === 'none') return fallback;
@@ -410,11 +669,25 @@ async function evaluateScheduledTask(task) {
     return {
       summary: content || fallback.summary,
       raw: content,
+      warranted: inferWorkWarranted(content, task),
     };
   } catch (error) {
     logError(error, { source: 'scheduled-task-evaluation', taskId: task.id });
     return fallback;
   }
+}
+
+function inferWorkWarranted(content, task) {
+  if (task.task_type === 'queue_agent') return true;
+  const text = String(content || '').toLowerCase();
+  if (!text.trim()) return false;
+  if (/\b(no work|not warranted|nothing changed|no changes|do not queue|no action)\b/.test(text)) {
+    return false;
+  }
+  if (/\b(work is warranted|warranted:\s*yes|queue an? agent|create a feature request|implementation objective)\b/.test(text)) {
+    return true;
+  }
+  return false;
 }
 
 async function runCodexScheduledEvaluation(task) {
@@ -470,12 +743,32 @@ function buildScheduledEvaluationFallback(task) {
       task.context ? `Context: ${JSON.stringify(task.context)}` : '',
     ].filter(Boolean).join('\n'),
     raw: null,
+    warranted: task.task_type === 'queue_agent',
   };
+}
+
+async function resolveCompanyAccountIdForEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) return null;
+
+  const { data, error } = await insforge.database
+    .from('company_account_members')
+    .select('company_account_id')
+    .eq('email', normalized)
+    .range(0, 0);
+
+  if (error) {
+    logError(error, { source: 'scheduled-company-account-lookup', email: normalized });
+    return null;
+  }
+
+  return data?.[0]?.company_account_id || null;
 }
 
 async function createScheduledMonitorWork(task, execution, evaluation) {
   const customerName = task.customer_name || task.customer || task.account_name || 'Customer';
   const customerEmail = task.customer_email || task.contact_email || 'scheduled-automation@forkable.site';
+  const companyAccountId = await resolveCompanyAccountIdForEmail(customerEmail);
   const branchPart = slugifyBranchPart(`${customerName}-scheduled-automation`);
   const title = `${customerName} scheduled automation finding`;
   const description = trimForDb([
@@ -494,6 +787,7 @@ async function createScheduledMonitorWork(task, execution, evaluation) {
       description,
       status: 'planning',
       feature_key: task.feature_key || null,
+      company_account_id: companyAccountId,
       user_id: task.user_id,
     }])
     .select('*');
@@ -502,60 +796,71 @@ async function createScheduledMonitorWork(task, execution, evaluation) {
   const request = requestRows?.[0];
   if (!request) throw new Error('Scheduled change request was not created.');
 
-  const planSnapshot = buildScheduledPlanSnapshot(task, evaluation, customerName);
-  const { data: planRows, error: planError } = await insforge.database
-    .from('change_request_plans')
-    .insert([{
-      change_request_id: request.id,
-      status: 'finalized',
-      summary: planSnapshot.summary,
-      implementation_plan: planSnapshot.implementation_plan,
-      acceptance_criteria: planSnapshot.acceptance_criteria,
-      coding_agent_prompt: planSnapshot.coding_agent_prompt,
-      context_bundle: planSnapshot.context_bundle,
-      finalized_at: new Date().toISOString(),
-      user_id: task.user_id,
-    }])
-    .select('*');
+  try {
+    const planSnapshot = buildScheduledPlanSnapshot(task, evaluation, customerName);
+    const { data: planRows, error: planError } = await insforge.database
+      .from('change_request_plans')
+      .insert([{
+        change_request_id: request.id,
+        status: 'finalized',
+        summary: planSnapshot.summary,
+        implementation_plan: planSnapshot.implementation_plan,
+        acceptance_criteria: planSnapshot.acceptance_criteria,
+        coding_agent_prompt: planSnapshot.coding_agent_prompt,
+        context_bundle: planSnapshot.context_bundle,
+        finalized_at: new Date().toISOString(),
+        user_id: task.user_id,
+      }])
+      .select('*');
 
-  assertDb(planError, 'Unable to create scheduled change request plan.');
-  const plan = planRows?.[0];
-  if (!plan) throw new Error('Scheduled change request plan was not created.');
+    assertDb(planError, 'Unable to create scheduled change request plan.');
+    const plan = planRows?.[0];
+    if (!plan) throw new Error('Scheduled change request plan was not created.');
 
-  const { data: runRows, error: runError } = await insforge.database
-    .from('agent_runs')
-    .insert([{
+    const { data: runRows, error: runError } = await insforge.database
+      .from('agent_runs')
+      .insert([{
+        change_request_id: request.id,
+        status: 'queued',
+        plan_id: plan.id,
+        plan_snapshot: planSnapshot,
+        trigger_type: execution.metadata?.trigger_type === 'manual' ? 'manual' : 'scheduled',
+        git_branch: `feat/${branchPart}`,
+        backend_branch: branchPart,
+        scheduled_task_id: task.id,
+        scheduled_execution_id: execution.id,
+        user_id: task.user_id,
+      }])
+      .select('*');
+
+    assertDb(runError, 'Unable to queue scheduled agent run.');
+    const run = runRows?.[0];
+    if (!run) throw new Error('Scheduled agent run was not created.');
+
+    await createAgentStepsForScheduledRun(run, planSnapshot, branchPart, task.user_id);
+    await updateScheduledExecution(execution.id, {
       change_request_id: request.id,
-      status: 'queued',
       plan_id: plan.id,
-      plan_snapshot: planSnapshot,
-      trigger_type: 'scheduled',
-      git_branch: `feat/${branchPart}`,
-      backend_branch: branchPart,
-      scheduled_task_id: task.id,
-      scheduled_execution_id: execution.id,
-      user_id: task.user_id,
-    }])
-    .select('*');
-
-  assertDb(runError, 'Unable to queue scheduled agent run.');
-  const run = runRows?.[0];
-  if (!run) throw new Error('Scheduled agent run was not created.');
-
-  await createAgentStepsForScheduledRun(run, planSnapshot, branchPart, task.user_id);
-  await updateChangeRequest(request.id, { status: 'building' });
-  const { error: sentError } = await insforge.database
-    .from('change_request_plans')
-    .update({
-      status: 'sent_to_agent',
-      sent_to_agent_at: new Date().toISOString(),
+      agent_run_id: run.id,
       updated_at: new Date().toISOString(),
-    })
-    .eq('id', plan.id);
+    });
+    await updateChangeRequest(request.id, { status: 'building' });
+    const { error: sentError } = await insforge.database
+      .from('change_request_plans')
+      .update({
+        status: 'sent_to_agent',
+        sent_to_agent_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', plan.id);
 
-  assertDb(sentError, 'Unable to mark scheduled plan as sent.');
+    assertDb(sentError, 'Unable to mark scheduled plan as sent.');
 
-  return { request, plan, run };
+    return { request, plan, run };
+  } catch (error) {
+    await insforge.database.from('change_requests').delete().eq('id', request.id);
+    throw error;
+  }
 }
 
 function buildScheduledPlanSnapshot(task, evaluation, customerName) {
@@ -589,7 +894,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
       'Hyperspell customer context is considered before code edits.',
       'Nia codebase impact planning is performed before code edits.',
       'The implementation is scoped to the scheduled automation finding.',
-      'Verification results and changed files are reported for review.',
+      'Verification results and changed files are captured before automatic merge and deploy.',
     ],
     coding_agent_prompt: codingAgentPrompt,
     context_bundle: {
@@ -612,7 +917,7 @@ async function createAgentStepsForScheduledRun(run, planSnapshot, branchPart, us
     `Create InsForge backend branch ${branchPart}`,
     'Implement the scheduled automation finding',
     'Deploy preview and run smoke tests',
-    'Prepare developer review package',
+    'Merge, deploy, enable company flag, and notify requester',
   ];
 
   const { error } = await insforge.database
@@ -631,6 +936,8 @@ async function createAgentStepsForScheduledRun(run, planSnapshot, branchPart, us
 
 function calculateNextRunAt(task, fromDate = new Date()) {
   const cron = String(task.cron || task.cron_expression || task.schedule || '').trim();
+  if (!cron && task.schedule_type === 'manual') return null;
+
   const everyMinutes = cron.match(/^\*\/(\d+) \* \* \* \*$/);
   if (everyMinutes) {
     return new Date(fromDate.getTime() + Math.max(1, Number(everyMinutes[1])) * 60 * 1000);
@@ -673,8 +980,9 @@ function slugifyBranchPart(value) {
     .slice(0, 48) || 'scheduled-automation';
 }
 
-async function executeRun(run) {
+async function executeRun(run, streamHandlers = {}) {
   log(`claimed run ${run.id}`);
+  streamHandlers.onStatus?.('Loading run context');
   await updateChangeRequest(run.change_request_id, { status: 'building' });
 
   const context = await loadRunContext(run);
@@ -699,36 +1007,62 @@ async function executeRun(run) {
 
   await maybeCreateBackendBranch(run, workspace);
 
-  const codexResult = await runCodex(run, context, workspace, runDir);
+  const codexResult = await runCodex(run, context, workspace, runDir, streamHandlers);
   await setStep(run.id, 5, 'passed', trimForDb(codexResult.finalMessage || 'Codex finished the implementation pass.'));
 
+  streamHandlers.onStatus?.('Committing changes');
   const commitSha = await commitAndMaybePush(run, workspace);
+  streamHandlers.onStatus?.('Running verification');
   const checks = await runChecks(workspace, runDir);
   await recordTestResults(run, checks);
 
+  streamHandlers.onStatus?.('Preparing preview and automatic shipment');
   const preview = await maybeDeployPreview(run, workspace);
   if (preview?.url) {
     await upsertPreview(run, preview);
   }
 
-  await setStep(run.id, 8, 'passed', [
-    commitSha ? `Commit: ${commitSha}` : 'No commit was created.',
-    preview?.url ? `Preview: ${preview.url}` : 'Preview deployment was not requested.',
-  ].join('\n'));
+  const checksPassed = checks.every((check) => check.status === 'passed');
+  let finalization = null;
+
+  if (checksPassed) {
+    finalization = await finalizeSuccessfulRun(run, context, workspace, runDir, {
+      commitSha,
+      preview,
+    });
+  } else {
+    await setStep(run.id, 8, 'failed', 'Verification failed; automatic merge and deploy were skipped.');
+  }
 
   const now = new Date().toISOString();
   await updateRun(run.id, {
-    status: checks.every((check) => check.status === 'passed') ? 'passed' : 'failed',
+    status: checksPassed ? 'merged' : 'failed',
     runner_finished_at: now,
     finished_at: now,
     output_summary: trimForDb(codexResult.finalMessage),
     commit_sha: commitSha,
-    preview_url: preview?.url || null,
+    preview_url: finalization?.productionUrl || preview?.url || null,
   });
 
   await updateChangeRequest(run.change_request_id, {
-    status: checks.every((check) => check.status === 'passed') ? 'review' : 'building',
+    status: checksPassed ? 'merged' : 'building',
   });
+
+  await createRunNotification({
+    run,
+    request: context.request,
+    success: checksPassed,
+    finalization,
+    preview,
+  });
+
+  return {
+    finalMessage: codexResult.finalMessage,
+    commitSha,
+    preview,
+    checks,
+    finalization,
+  };
 }
 
 async function loadRunContext(run) {
@@ -834,7 +1168,7 @@ async function maybeCreateBackendBranch(run, workspace) {
   }
 }
 
-async function runCodex(run, context, workspace, runDir) {
+async function runCodex(run, context, workspace, runDir, streamHandlers = {}) {
   await setStep(run.id, 5, 'running', 'Codex is implementing the planned feature.');
 
   assertCodexAuthAvailable();
@@ -853,6 +1187,9 @@ async function runCodex(run, context, workspace, runDir) {
     logPath: path.join(runDir, 'codex.jsonl'),
     sandbox: 'workspace-write',
     timeoutMs: Number(process.env.FORKABLE_CODEX_TIMEOUT_MS || 45 * 60 * 1000),
+    onJsonEvent: streamHandlers.onDelta
+      ? createCodexPlanningEventHandler(streamHandlers)
+      : undefined,
   });
 
   const finalMessage = await readTextIfExists(finalPath);
@@ -860,7 +1197,7 @@ async function runCodex(run, context, workspace, runDir) {
   return { finalMessage };
 }
 
-async function runCodexPlanningChat(body) {
+async function runCodexPlanningChat(body, streamHandlers = {}) {
   assertCodexAuthAvailable();
 
   const planningId = randomUUID();
@@ -869,9 +1206,11 @@ async function runCodexPlanningChat(body) {
   const codexHome = path.join(config.codexHome, `planning-${planningId}`);
   const outputPath = path.join(planningDir, 'final.md');
 
+  streamHandlers.onStatus?.('preparing Codex');
   await mkdir(planningDir, { recursive: true });
-  await prepareCodexHome(codexHome, workspace);
+  await prepareCodexHome(codexHome, workspace, { includeMcpServers: false });
 
+  streamHandlers.onStatus?.('starting Codex');
   await runCodexExec({
     codexHome,
     workspace,
@@ -880,6 +1219,9 @@ async function runCodexPlanningChat(body) {
     logPath: path.join(planningDir, 'codex-planning.jsonl'),
     sandbox: 'read-only',
     timeoutMs: Number(process.env.FORKABLE_CODEX_PLANNING_TIMEOUT_MS || 3 * 60 * 1000),
+    onJsonEvent: streamHandlers.onDelta
+      ? createCodexPlanningEventHandler(streamHandlers)
+      : undefined,
   });
 
   const finalMessage = await readTextIfExists(outputPath);
@@ -892,6 +1234,222 @@ async function runCodexPlanningChat(body) {
   return finalMessage.trim();
 }
 
+async function runCodexAutomationSetup(body) {
+  assertCodexAuthAvailable();
+
+  const setupId = randomUUID();
+  const setupDir = path.join(config.workdir, 'automation-setup', setupId);
+  const workspace = setupDir;
+  const codexHome = path.join(config.codexHome, `automation-setup-${setupId}`);
+  const outputPath = path.join(setupDir, 'setup.json');
+
+  await mkdir(setupDir, { recursive: true });
+  await prepareCodexHome(codexHome, workspace, { includeMcpServers: false });
+
+  await runCodexExec({
+    codexHome,
+    workspace,
+    prompt: buildAutomationSetupPrompt(body),
+    outputPath,
+    logPath: path.join(setupDir, 'codex-automation-setup.jsonl'),
+    sandbox: 'read-only',
+    timeoutMs: Number(process.env.FORKABLE_CODEX_AUTOMATION_SETUP_TIMEOUT_MS || 2 * 60 * 1000),
+  });
+
+  const finalMessage = await readTextIfExists(outputPath);
+  await persistCodexAuth(codexHome);
+
+  return parseAutomationSetupResult(finalMessage);
+}
+
+function buildAutomationSetupPrompt(body) {
+  const task = body?.task || {};
+  const message = String(body?.message || '');
+
+  return [
+    "You are Forkable's automation setup agent running on InsForge Compute through Codex.",
+    '',
+    'Convert the user request into scheduled_agent_tasks fields. The app will persist the result.',
+    '',
+    'Return only valid JSON. Do not wrap it in Markdown. Do not include commentary outside JSON.',
+    '',
+    'Required JSON shape:',
+    JSON.stringify({
+      status: 'configured | needs_more_info',
+      title: 'short automation title',
+      prompt: 'the durable automation instructions',
+      cronExpression: 'cron in minute hour * * * form, or null',
+      scheduleLabel: 'human-readable schedule, or null',
+      scheduleType: 'daily | weekly | monthly | cron | manual',
+      timezone: 'IANA timezone, default America/Los_Angeles when PT/Pacific is mentioned',
+      assistantMessage: 'concise user-facing confirmation or one missing-info question',
+    }, null, 2),
+    '',
+    'Rules:',
+    '- If the request includes both the work and timing, set status to configured.',
+    '- If timing is missing or ambiguous, set status to needs_more_info and ask one concise question.',
+    '- For "every day at 3:23 pm PT", use cronExpression "23 15 * * *", scheduleType "daily", timezone "America/Los_Angeles".',
+    '- For weekdays, use cronExpression with day-of-week 1-5.',
+    '- The title should describe the automation, not say "New automation".',
+    '- Keep the prompt durable enough for a future scheduled runner to execute.',
+    '',
+    'Existing automation task:',
+    JSON.stringify({
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      instructions: task.instructions,
+      prompt: task.prompt,
+      status: task.status,
+      schedule_label: task.schedule_label,
+      cron_expression: task.cron_expression,
+      timezone: task.timezone,
+      customer_name: task.customer_name,
+      customer_email: task.customer_email,
+    }, null, 2),
+    '',
+    `Latest user message: ${message}`,
+  ].join('\n');
+}
+
+function parseAutomationSetupResult(raw) {
+  const text = String(raw || '').trim();
+  if (!text) throw new Error('Codex returned an empty automation setup response.');
+
+  const jsonText = text
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (error) {
+    throw new Error(`Codex returned invalid automation setup JSON: ${error.message}`);
+  }
+
+  const status = parsed.status === 'configured' ? 'configured' : 'needs_more_info';
+  return {
+    status,
+    title: typeof parsed.title === 'string' ? parsed.title.slice(0, 120) : 'Scheduled automation',
+    prompt: typeof parsed.prompt === 'string' ? parsed.prompt : '',
+    cronExpression: typeof parsed.cronExpression === 'string' ? parsed.cronExpression : null,
+    scheduleLabel: typeof parsed.scheduleLabel === 'string' ? parsed.scheduleLabel : null,
+    scheduleType: typeof parsed.scheduleType === 'string' ? parsed.scheduleType : 'manual',
+    timezone: typeof parsed.timezone === 'string' ? parsed.timezone : 'America/Los_Angeles',
+    assistantMessage: typeof parsed.assistantMessage === 'string' ? parsed.assistantMessage : '',
+  };
+}
+
+function createCodexPlanningEventHandler({ onDelta, onStatus }) {
+  let assistantText = '';
+
+  return (event) => {
+    const status = extractCodexStatus(event);
+    if (status) onStatus?.(status);
+
+    const nextText = extractCodexAssistantText(event);
+    if (!nextText) return;
+
+    if (nextText.startsWith(assistantText)) {
+      const delta = nextText.slice(assistantText.length);
+      assistantText = nextText;
+      if (delta) onDelta(delta);
+      return;
+    }
+
+    assistantText += nextText;
+    onDelta(nextText);
+  };
+}
+
+function extractCodexStatus(event) {
+  const type = String(event?.method || event?.type || event?.msg?.type || '');
+  if (type === 'item/started' || type === 'item.started') {
+    const itemType = String(event?.params?.item?.type || event?.item?.type || '');
+    if (itemType && !['agentMessage', 'agent_message'].includes(itemType)) return itemType;
+  }
+  if (type.includes('tool') || type.includes('exec') || type.includes('mcp')) {
+    return type.replaceAll('_', ' ').replaceAll('/', ' ');
+  }
+  return '';
+}
+
+function extractCodexAssistantText(event) {
+  if (!event || typeof event !== 'object') return '';
+  const eventName = String(event.method || event.type || '');
+
+  if (eventName === 'item/agentMessage/delta') {
+    return typeof event.params?.delta === 'string' ? event.params.delta : '';
+  }
+
+  if (
+    (eventName === 'item/completed' || eventName === 'item.completed') &&
+    ['agentMessage', 'agent_message'].includes(event.params?.item?.type || event.item?.type) &&
+    typeof (event.params?.item?.text || event.item?.text) === 'string'
+  ) {
+    return event.params?.item?.text || event.item.text;
+  }
+
+  const candidates = [
+    event.delta,
+    event.content,
+    event.text,
+    event.message,
+    event.msg?.delta,
+    event.msg?.content,
+    event.msg?.text,
+    event.item?.text,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && isAssistantTextEvent(event)) return candidate;
+  }
+
+  const itemText = extractTextFromContent(event.item?.content);
+  if (itemText && isAssistantTextEvent(event)) return itemText;
+
+  const messageText = extractTextFromContent(event.message?.content || event.msg?.message?.content);
+  if (messageText && isAssistantTextEvent(event)) return messageText;
+
+  return '';
+}
+
+function extractTextFromContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (typeof part?.text === 'string') return part.text;
+      if (typeof part?.content === 'string') return part.content;
+      return '';
+    })
+    .join('');
+}
+
+function isAssistantTextEvent(event) {
+  const role = event.role || event.item?.role || event.message?.role || event.msg?.role;
+  if (role && role !== 'assistant') return false;
+
+  const method = String(event.method || '');
+  if (method) {
+    return method.includes('agentMessage') || method.includes('output_text');
+  }
+
+  const type = String(event.type || event.msg?.type || event.item?.type || '');
+  if (!type) return true;
+
+  return (
+    type.includes('message') ||
+    type.includes('agent_message') ||
+    type.includes('output_text') ||
+    type.includes('assistant') ||
+    type.includes('response')
+  );
+}
+
 async function runCodexExec({
   codexHome,
   workspace,
@@ -900,6 +1458,7 @@ async function runCodexExec({
   logPath,
   sandbox,
   timeoutMs,
+  onJsonEvent,
 }) {
   await execCommand(
     'codex',
@@ -924,9 +1483,10 @@ async function runCodexExec({
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
-        CODEX_API_KEY: process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY || '',
+        CODEX_API_KEY: process.env.CODEX_API_KEY || '',
       },
       timeoutMs,
+      onJsonEvent,
     },
   );
 }
@@ -935,6 +1495,7 @@ function buildPlanningPrompt(body) {
   const request = body?.request || {};
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const latestMessage = String(body?.message || '');
+  const isInitialKickoff = body?.isInitialKickoff === true;
   const history = messages
     .slice(-12)
     .map((message) => `${String(message.role || 'user').toUpperCase()}: ${String(message.content || '')}`)
@@ -943,25 +1504,40 @@ function buildPlanningPrompt(body) {
   return [
     "You are Forkable's interactive feature planning agent.",
     '',
-    'Your job is to help a developer and product owner refine one customer feature request into a safe coding-agent handoff.',
+    'Your job is to help a logged-in company user scope, plan, build, test, and ship one CRM workflow request end to end.',
     '',
     'Rules:',
+    '- Use the private request context to know rollout scope, but do not mention the company name unless the user asks or it is needed for clarity.',
+    '- Never ask which customer or company should receive the change; rollout scope comes from the authenticated user mapping.',
+    '- Do not ask whether the feature should apply only to a CRM customer, deal account, or named company; assume the authenticated company account is the rollout scope unless the user explicitly asks for deal-account-specific behavior.',
     '- Ask only for missing decisions that materially affect implementation.',
-    '- Keep the plan grounded in Git branches, InsForge backend branches, Nia repository context, Hyperspell customer context, backend enforcement, preview deploys, smoke tests, and developer review.',
+    '- Keep the plan grounded in authenticated company scope, Git branches, InsForge backend branches, Nia repository context, Hyperspell company context, backend enforcement, preview deploys, smoke tests, and automatic merge/deploy.',
     '- Do not claim code has been changed.',
+    '- For the initial turn, begin helping immediately from the submitted description and ask the next useful scoping question.',
     '- Keep the reply concise and conversational.',
     '- If the request is ready, say it is ready to draft and send to the coding agent.',
     '',
-    'Feature request:',
-    JSON.stringify(request, null, 2),
+    'Private feature request context:',
+    JSON.stringify({
+      title: request.title,
+      description: request.description,
+      status: request.status,
+      feature_key: request.feature_key,
+      company_account_id: request.company_account_id,
+      company_name: request.customer_name,
+      requester_email: request.customer_email,
+    }, null, 2),
     '',
     history ? `Planning conversation so far:\n${history}` : 'Planning conversation so far: none',
     '',
-    `Latest user message: ${latestMessage}`,
+    isInitialKickoff
+      ? `Initial workflow request description: ${latestMessage}`
+      : `Latest user message: ${latestMessage}`,
   ].join('\n');
 }
 
-function buildCodexConfig(workspace) {
+function buildCodexConfig(workspace, options = {}) {
+  const includeMcpServers = options.includeMcpServers !== false;
   const escapedWorkspace = workspace.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
   const parts = [
     `model = "${config.codexModel}"`,
@@ -981,7 +1557,7 @@ function buildCodexConfig(workspace) {
     'trust_level = "trusted"',
   ];
 
-  if (process.env.NIA_API_KEY) {
+  if (includeMcpServers && process.env.NIA_API_KEY) {
     parts.push(
       '',
       '[mcp_servers.nia]',
@@ -992,7 +1568,7 @@ function buildCodexConfig(workspace) {
     );
   }
 
-  if (process.env.HYPERSPELL_API_KEY && process.env.HYPERSPELL_USER_ID) {
+  if (includeMcpServers && process.env.HYPERSPELL_API_KEY && process.env.HYPERSPELL_USER_ID) {
     parts.push(
       '',
       '[mcp_servers.hyperspell]',
@@ -1008,9 +1584,9 @@ function buildCodexConfig(workspace) {
   return `${parts.join('\n')}\n`;
 }
 
-async function prepareCodexHome(codexHome, workspace) {
+async function prepareCodexHome(codexHome, workspace, options = {}) {
   await mkdir(codexHome, { recursive: true });
-  await writeFile(path.join(codexHome, 'config.toml'), buildCodexConfig(workspace));
+  await writeFile(path.join(codexHome, 'config.toml'), buildCodexConfig(workspace, options));
 
   const sourceAuthPath = path.join(config.codexHome, 'auth.json');
   if (await exists(sourceAuthPath)) {
@@ -1045,7 +1621,6 @@ async function persistCodexAuth(codexHome) {
 
 function getCodexAuthMode() {
   if (process.env.CODEX_API_KEY) return 'api_key';
-  if (process.env.OPENAI_API_KEY) return 'openai_api_key_compat';
   if (process.env.CODEX_AUTH_JSON_B64 || process.env.CODEX_AUTH_JSON) return 'chatgpt_auth_seed';
   if (hasChunkedCodexAuth()) return 'chatgpt_auth_seed_chunked';
   if (state.codexAuthReady) return 'chatgpt_auth_file';
@@ -1055,7 +1630,6 @@ function getCodexAuthMode() {
 function assertCodexAuthAvailable() {
   if (
     process.env.CODEX_API_KEY ||
-    process.env.OPENAI_API_KEY ||
     process.env.CODEX_AUTH_JSON_B64 ||
     process.env.CODEX_AUTH_JSON ||
     hasChunkedCodexAuth() ||
@@ -1126,7 +1700,7 @@ function buildPrompt(run, context) {
     '- Schema/RLS changes.',
     '- Commands run and results.',
     '- Smoke test checklist.',
-    '- Any residual risks or manual review notes.',
+    '- Any residual risks or follow-up notes.',
   ].filter(Boolean).join('\n');
 }
 
@@ -1281,6 +1855,155 @@ async function upsertPreview(run, preview) {
   assertDb(error, 'Unable to record preview deployment.');
 }
 
+async function finalizeSuccessfulRun(run, context, workspace, runDir, result) {
+  await setStep(run.id, 8, 'running', 'Automatically merging, deploying, enabling the company flag, and notifying the requester.');
+
+  const merge = await mergeFeatureBranch(run, workspace, runDir, result.commitSha);
+  const production = await maybeDeployProduction(workspace);
+  const featureKey = resolveFeatureKey(run, context);
+  const flag = await maybeEnableCompanyFeatureFlag(run, context, featureKey);
+
+  const details = [
+    result.commitSha ? `Commit: ${result.commitSha}` : 'No commit was created.',
+    merge,
+    production?.url ? `Production deploy: ${production.url}` : 'Production deploy was not configured.',
+    result.preview?.url ? `Preview: ${result.preview.url}` : 'Preview deployment was not requested.',
+    flag ? `Enabled feature flag ${featureKey} for the requesting company.` : 'No company feature flag was enabled.',
+  ];
+
+  await setStep(run.id, 8, 'passed', details.join('\n'));
+
+  return {
+    productionUrl: production?.url || null,
+    featureKey,
+    flagEnabled: Boolean(flag),
+  };
+}
+
+async function mergeFeatureBranch(run, workspace, runDir, commitSha) {
+  if (!config.autoMerge) return 'Automatic merge is disabled for this runner.';
+  if (!commitSha) return 'No commit was created, so there was nothing to merge.';
+
+  const targetRef = config.repoRef || 'main';
+  await execCommand('git', ['checkout', targetRef], {
+    cwd: workspace,
+    logPath: path.join(runDir, 'git-checkout-target.log'),
+  });
+  await execCommand('git', ['merge', '--no-ff', run.git_branch || commitSha, '-m', `Merge ${run.git_branch || commitSha}`], {
+    cwd: workspace,
+    logPath: path.join(runDir, 'git-merge.log'),
+    timeoutMs: 10 * 60 * 1000,
+  });
+
+  if (config.pushBranch) {
+    await execCommand('git', ['push', 'origin', targetRef], {
+      cwd: workspace,
+      logPath: path.join(runDir, 'git-push-target.log'),
+      timeoutMs: 10 * 60 * 1000,
+    });
+    return `Merged into ${targetRef} and pushed.`;
+  }
+
+  return `Merged into ${targetRef} locally; set FORKABLE_PUSH_BRANCH=true to push automatically.`;
+}
+
+async function maybeDeployProduction(workspace) {
+  if (!config.deployProduction) return null;
+
+  await execCommand(
+    'npx',
+    ['@insforge/cli', 'deployments', 'deploy', '.', '--json'],
+    {
+      cwd: workspace,
+      logPath: path.join(workspace, '..', 'production-deploy.json'),
+      timeoutMs: 20 * 60 * 1000,
+    },
+  );
+
+  const raw = await readTextIfExists(path.join(workspace, '..', 'production-deploy.json'));
+  const deployment = parseLastJsonObject(raw);
+  return {
+    url: deployment?.url || deployment?.deploymentUrl || deployment?.app_url || null,
+    id: deployment?.id || deployment?.deployment_id || null,
+  };
+}
+
+function resolveFeatureKey(run, context) {
+  const snapshot = run.plan_snapshot || {};
+  const contextBundle = snapshot.context_bundle || {};
+  return contextBundle.feature_key || context.request.feature_key || run.backend_branch || null;
+}
+
+async function maybeEnableCompanyFeatureFlag(run, context, featureKey) {
+  const companyAccountId = context.request.company_account_id;
+  if (!companyAccountId || !featureKey) return null;
+
+  await ensureFeatureFlag(featureKey, context.request);
+
+  const { error } = await insforge.database
+    .from('company_feature_flags')
+    .upsert([{
+      company_account_id: companyAccountId,
+      feature_key: featureKey,
+      enabled: true,
+      rollout_stage: 'production',
+      notes: `Automatically enabled after agent run ${run.id} merged.`,
+      user_id: run.user_id,
+      updated_at: new Date().toISOString(),
+    }], { onConflict: 'company_account_id,feature_key,user_id' });
+
+  if (isMissingOptionalTable(error, 'company_feature_flags')) return null;
+  assertDb(error, 'Unable to enable company feature flag.');
+  return true;
+}
+
+async function ensureFeatureFlag(featureKey, request) {
+  const { error } = await insforge.database
+    .from('feature_flags')
+    .upsert([{
+      key: featureKey,
+      name: request.title || featureKey.replace(/[_-]+/g, ' '),
+      description: `Automatically managed for change request ${request.id}.`,
+    }], { onConflict: 'key' });
+
+  assertDb(error, 'Unable to ensure feature flag.');
+}
+
+async function createRunNotification({ run, request, success, finalization, preview }) {
+  const title = success
+    ? `${request.title || 'Feature request'} merged and deployed`
+    : `${request.title || 'Feature request'} needs attention`;
+  const body = success
+    ? [
+      'The coding agent finished, checks passed, and the change was merged automatically.',
+      finalization?.flagEnabled ? 'The company feature flag is enabled for the requesting company.' : '',
+      finalization?.productionUrl ? `Deployment: ${finalization.productionUrl}` : preview?.url ? `Preview: ${preview.url}` : '',
+    ].filter(Boolean).join(' ')
+    : 'The coding agent run failed before automatic merge and deploy. Open the run for details.';
+
+  const { error } = await insforge.database.from('user_notifications').insert([{
+    title,
+    body,
+    kind: success ? 'success' : 'error',
+    source_type: 'agent_run',
+    action_label: 'Open run',
+    action_href: `/feature-runs/${run.id}`,
+    change_request_id: run.change_request_id,
+    plan_id: run.plan_id || null,
+    agent_run_id: run.id,
+    metadata: {
+      status: success ? 'merged' : 'failed',
+      feature_key: finalization?.featureKey || null,
+      production_url: finalization?.productionUrl || null,
+      preview_url: preview?.url || null,
+    },
+    user_id: run.user_id,
+  }]);
+
+  if (isMissingOptionalTable(error, 'user_notifications')) return;
+  assertDb(error, 'Unable to create run notification.');
+}
+
 async function failRun(runId, error) {
   const message = trimForDb(formatError(error));
   logError(error, { runId });
@@ -1356,6 +2079,7 @@ async function execCommand(command, args, options = {}) {
     logPath,
     captureOnly = false,
     timeoutMs = 10 * 60 * 1000,
+    onJsonEvent,
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -1373,11 +2097,29 @@ async function execCommand(command, args, options = {}) {
       reject(new Error(redact(`Command timed out after ${timeoutMs}ms: ${command} ${args.join(' ')}`)));
     }, timeoutMs);
 
-    child.stdout.on('data', (chunk) => {
-      const text = redact(String(chunk));
-      stdout += text;
-      logStream?.write(text);
-    });
+    const jsonLines = onJsonEvent
+      ? createInterface({ input: child.stdout, crlfDelay: Infinity })
+      : null;
+
+    if (jsonLines) {
+      jsonLines.on('line', (line) => {
+        const text = redact(line);
+        stdout += `${text}\n`;
+        logStream?.write(`${text}\n`);
+
+        try {
+          onJsonEvent(JSON.parse(text));
+        } catch {
+          // Codex JSON output should be newline-delimited JSON; keep raw output in logs if a line is not JSON.
+        }
+      });
+    } else {
+      child.stdout.on('data', (chunk) => {
+        const text = redact(String(chunk));
+        stdout += text;
+        logStream?.write(text);
+      });
+    }
 
     child.stderr.on('data', (chunk) => {
       const text = redact(String(chunk));
@@ -1416,7 +2158,6 @@ function redact(value) {
   for (const secret of [
     process.env.INSFORGE_API_KEY,
     process.env.CODEX_API_KEY,
-    process.env.OPENAI_API_KEY,
     process.env.CODEX_AUTH_JSON,
     process.env.CODEX_AUTH_JSON_B64,
     ...Object.entries(process.env)
@@ -1442,6 +2183,32 @@ function tail(value) {
 
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatPlanningChatError(error) {
+  const message = formatError(error);
+  if (
+    message.includes('token_revoked') ||
+    message.includes('refresh_token_invalidated') ||
+    message.includes('invalidated oauth token') ||
+    message.includes('refresh token has been invalidated')
+  ) {
+    return 'Codex authentication on the runner has expired. Reconnect Codex auth for the Forkable runner, then retry the planning chat.';
+  }
+
+  if (message.includes('FORKABLE_TARGET_REPO_URL')) {
+    return 'The Forkable runner is missing its target repository configuration.';
+  }
+
+  if (message.includes('Codex returned an empty planning response')) {
+    return 'Codex returned an empty planning response. Retry the planning chat.';
+  }
+
+  if (message.includes('Command timed out')) {
+    return 'The planning agent timed out. Retry with a shorter request or check the runner logs.';
+  }
+
+  return 'The planning agent failed. Check the runner logs for details, then retry.';
 }
 
 function assertDb(error, message) {

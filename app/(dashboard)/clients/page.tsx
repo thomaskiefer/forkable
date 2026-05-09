@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { ArrowUpRight, BriefcaseBusiness, GitPullRequestArrow, Plus, Users } from 'lucide-react';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
-import { getChangeRequests, getClients, getProjects } from '@/lib/queries';
+import { getChangeRequests, getClients, getLeadStages, getLeadsByStage, getProjects } from '@/lib/queries';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -11,6 +11,9 @@ import { cn } from '@/lib/utils';
 type ClientRow = Record<string, unknown>;
 type ProjectRow = Record<string, unknown>;
 type RequestRow = Record<string, unknown>;
+type LeadRow = Record<string, unknown>;
+type StageRow = Record<string, unknown>;
+type Urgency = 'low' | 'medium' | 'high';
 
 const currency = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -58,6 +61,12 @@ function daysBetween(from: Date, to: Date) {
   return Math.ceil((to.getTime() - from.getTime()) / 86_400_000);
 }
 
+function daysSince(value: unknown, now: Date) {
+  const date = parseDate(value);
+  if (!date) return 0;
+  return Math.max(0, daysBetween(date, now));
+}
+
 function parseDate(value: unknown) {
   if (typeof value !== 'string') return null;
   const date = new Date(value);
@@ -89,13 +98,48 @@ function getContractValue(client: ClientRow, projects: ProjectRow[]) {
   return base + activeBillable * 80_000;
 }
 
+function getStageProbability(stage: StageRow | undefined, stageCount: number, status: string) {
+  if (status === 'unqualified') return 5;
+
+  const orderIndex = typeof stage?.order_index === 'number' ? stage.order_index : 0;
+  const stagePosition = stageCount > 1 ? orderIndex / Math.max(1, stageCount - 1) : 0;
+  const stageProbability = Math.round(15 + stagePosition * 70);
+  const boundedStageProbability = Math.max(10, Math.min(stageProbability, 85));
+
+  if (status === 'qualified') return Math.max(boundedStageProbability, 60);
+  if (status === 'contacted') return Math.max(boundedStageProbability, 30);
+  return boundedStageProbability;
+}
+
+function getLeadUrgency(lead: LeadRow, stage: StageRow | undefined, stageCount: number, now: Date): Urgency {
+  const status = String(lead.status ?? '').toLowerCase();
+  const age = daysSince(lead.created_at, now);
+  const dealValue = typeof lead.deal_value === 'number' ? lead.deal_value : 0;
+  const probability = getStageProbability(stage, stageCount, status);
+
+  if (status === 'qualified' && (dealValue >= 50_000 || age >= 21)) return 'high';
+  if (probability >= 65 && age >= 14) return 'high';
+  if (status === 'contacted' && age >= 14) return 'high';
+  if (status === 'new' && age >= 7) return 'high';
+  if (dealValue >= 25_000 || age >= 10 || probability >= 55) return 'medium';
+  return 'low';
+}
+
 function getHealth(
   client: ClientRow,
   projects: ProjectRow[],
   requests: RequestRow[],
+  leads: LeadRow[],
+  stagesById: Map<string, StageRow>,
+  stageCount: number,
   now: Date,
 ) {
   if (!client.is_active) return 'Dormant';
+
+  const activeProjects = projects.filter(
+    (project) => !['completed', 'cancelled'].includes(String(project.deal_status ?? '').toLowerCase()),
+  ).length;
+  const renewalDays = daysBetween(now, getRenewalDate(client, now));
 
   const hasOverdueProject = projects.some((project) => {
     const dueDate = parseDate(project.end_date);
@@ -103,24 +147,39 @@ function getHealth(
   });
   if (hasOverdueProject) return 'Risk';
 
+  const leadUrgencies = leads.map((lead) => {
+    const stageId = typeof lead.current_stage_id === 'string' ? lead.current_stage_id : '';
+    return getLeadUrgency(lead, stagesById.get(stageId), stageCount, now);
+  });
+  if (leadUrgencies.includes('high')) return 'Risk';
+
   const hasOpenRequest = requests.some((request) =>
     !['completed', 'cancelled', 'merged', 'shipped'].includes(String(request.status ?? '').toLowerCase()),
   );
-  if (hasOpenRequest || projects.length === 0) return 'Watch';
+  if (leadUrgencies.includes('medium') || hasOpenRequest || projects.length === 0 || activeProjects >= 2 || renewalDays <= 90) {
+    return 'Watch';
+  }
 
   return 'Strong';
 }
 
 export default async function ClientsPage() {
   const { accessToken: token } = await requireAuthenticatedSession();
-  const [{ clients, count }, projectsResult, changeRequests] = await Promise.all([
+  const [{ clients, count }, projectsResult, changeRequests, leads, stages] = await Promise.all([
     getClients(token),
     getProjects(token),
     getChangeRequests(token),
+    getLeadsByStage(token),
+    getLeadStages(token),
   ]);
 
   const projects = projectsResult.projects as ProjectRow[];
   const requests = changeRequests as RequestRow[];
+  const pipelineLeads = leads as LeadRow[];
+  const pipelineStages = stages as StageRow[];
+  const stagesById = new Map(
+    pipelineStages.map((stage) => [String(stage.id), stage]),
+  );
   const now = new Date();
 
   const openProjectCount = projects.filter(
@@ -217,7 +276,32 @@ export default async function ClientsPage() {
                 const activeProjects = clientProjects.filter(
                   (project) => !['completed', 'cancelled'].includes(String(project.deal_status ?? '').toLowerCase()),
                 ).length;
-                const health = getHealth(client, clientProjects, clientRequests, now);
+                const clientLeads = pipelineLeads.filter((lead) => {
+                  const leadAccountId = lead.company_account_id;
+                  if (leadAccountId && leadAccountId === client.company_account_id) {
+                    return true;
+                  }
+
+                  return (
+                    String(lead.company_name ?? '').trim().toLowerCase() ===
+                    name.trim().toLowerCase()
+                  );
+                }).filter((lead) => {
+                  const status = String(lead.status ?? '').toLowerCase();
+                  const stageName = String(
+                    (lead.current_stage as Record<string, unknown> | undefined)?.name ?? '',
+                  ).toLowerCase();
+                  return status !== 'unqualified' && stageName !== 'closed won' && stageName !== 'lost';
+                });
+                const health = getHealth(
+                  client,
+                  clientProjects,
+                  clientRequests,
+                  clientLeads,
+                  stagesById,
+                  pipelineStages.length,
+                  now,
+                );
                 const lastTouch = [
                   parseDate(client.updated_at),
                   ...clientProjects.map((project) => parseDate(project.updated_at)),

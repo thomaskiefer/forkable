@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { CalendarClock } from 'lucide-react';
 import { CreateAutomationButton } from '@/components/automations/create-automation-button';
 import { ScheduledAgentChat } from '@/components/automations/scheduled-agent-chat';
+import { DeleteRecordButton } from '@/components/delete-record-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
 import {
@@ -38,7 +39,7 @@ function taskSchedule(task: ScheduledAgentTask) {
   return taskString(
     task as TaskRecord,
     ['schedule_label', 'schedule', 'cron_expression', 'rrule'],
-    'Draft schedule',
+    'Waiting for schedule',
   );
 }
 
@@ -68,8 +69,8 @@ export default async function AutomationsPage({
         <EmptyState
           icon={CalendarClock}
           eyebrow="No automations"
-          title="Create your first scheduled agent"
-          description="Create a blank automation, then define the monitoring task and schedule in chat."
+          title="Describe an automation"
+          description="Tell the agent what should happen and when. It will set up the schedule."
           action={<CreateAutomationButton />}
         />
       ) : (
@@ -85,27 +86,34 @@ export default async function AutomationsPage({
                 const isSelected = task.id === selectedTask.id;
 
                 return (
-                  <Link
+                  <div
                     key={task.id}
-                    href={`/automations?task=${task.id}`}
-                    aria-current={isSelected ? 'page' : undefined}
                     className={cn(
-                      'block border-b px-3 py-3 transition-colors',
+                      'flex items-start gap-2 border-b px-3 py-3 transition-colors',
                       'dark:border-white/10',
                       isSelected
                         ? 'bg-accent/45 dark:bg-white/[0.08]'
                         : 'hover:bg-accent/25 dark:hover:bg-white/[0.055]',
                     )}
                   >
-                    <div className="space-y-1">
+                    <Link
+                      href={`/automations?task=${task.id}`}
+                      aria-current={isSelected ? 'page' : undefined}
+                      className="min-w-0 flex-1 space-y-1"
+                    >
                       <p className="line-clamp-2 text-sm font-medium leading-5">
                         {taskTitle(task)}
                       </p>
                       <p className="truncate text-xs text-muted-foreground">
                         {taskSchedule(task)}
                       </p>
-                    </div>
-                  </Link>
+                    </Link>
+                    <DeleteRecordButton
+                      endpoint={`/api/automations/${task.id}`}
+                      label="automation"
+                      redirectTo="/automations"
+                    />
+                  </div>
                 );
               })}
             </div>

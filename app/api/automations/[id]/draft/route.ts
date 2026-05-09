@@ -64,7 +64,7 @@ export async function POST(
     id,
     [
       message(
-        'Draft schedule saved. Review the timing fields, then activate the automation.',
+        'Schedule saved. I can activate the automation when you are ready.',
       ),
     ],
     viewer.id,

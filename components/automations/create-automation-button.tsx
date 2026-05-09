@@ -29,7 +29,7 @@ export function CreateAutomationButton() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title: 'New automation',
+          title: 'Automation setup',
           task_type: 'monitor_context',
           status: 'draft',
         }),
@@ -38,7 +38,7 @@ export function CreateAutomationButton() {
       if (!response.ok) throw new Error(await getErrorMessage(response));
       const body = (await response.json()) as { task?: ScheduledAgentTask };
       if (!body.task) throw new Error('Automation was not created.');
-      toast.success('Automation draft created.');
+      toast.success('Describe what should happen and when.');
       shouldResetCreating = false;
       router.push(`/automations?task=${body.task.id}`);
       router.refresh();
@@ -54,7 +54,7 @@ export function CreateAutomationButton() {
   return (
     <Button onClick={createAutomation} disabled={isCreating}>
       {isCreating ? <Loader2 className="animate-spin" /> : <Plus />}
-      New automation
+      New
     </Button>
   );
 }

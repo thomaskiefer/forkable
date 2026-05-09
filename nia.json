@@ -1,0 +1,13 @@
+{
+  "$schema": "https://trynia.ai/schema/project.json",
+  "version": 1,
+  "name": "forkable",
+  "sources": [
+    "thomaskiefer/forkable"
+  ],
+  "vaults": [],
+  "local": [],
+  "defaults": {
+    "search_mode": "scoped"
+  }
+}

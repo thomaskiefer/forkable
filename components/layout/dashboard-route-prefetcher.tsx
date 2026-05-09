@@ -11,6 +11,7 @@ export const dashboardPrefetchRoutes = [
   '/projects',
   '/feature-requests',
   '/automations',
+  '/notifications',
 ];
 
 function scheduleIdleWork(callback: () => void) {

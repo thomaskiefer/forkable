@@ -61,12 +61,18 @@ export function FeatureRequestIntakeForm() {
   return (
     <form
       onSubmit={submitRequest}
+      onKeyDown={(event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+          event.preventDefault();
+          event.currentTarget.requestSubmit();
+        }
+      }}
       className="w-full max-w-2xl rounded-[1.15rem] border bg-card p-7 sm:p-8 dark:border-white/[0.12] dark:bg-[#070707]/88"
     >
       <div className="space-y-1.5">
         <p className="text-sm text-muted-foreground">New feature request</p>
         <h1 className="font-display text-2xl font-medium tracking-tight">
-          Start with your company's workflow request
+          Start with your company's feature request
         </h1>
       </div>
 
@@ -77,18 +83,18 @@ export function FeatureRequestIntakeForm() {
             id="title"
             name="title"
             className="h-11 px-4"
-            placeholder="Enterprise Deal Approval Gate"
+            placeholder="Sort Clients table by attribute"
             required
           />
         </div>
 
         <div className="space-y-3">
-          <Label htmlFor="description">Workflow request</Label>
+          <Label htmlFor="description">Feature request</Label>
           <Textarea
             id="description"
             name="description"
             className="min-h-28 resize-none px-4 py-3"
-            placeholder="Any deal over $50k must go through Legal Review before it can move to Contract Sent or Closed Won."
+            placeholder="Let users sort the Clients tab by company name, deal value, last activity, and ARR. Default sort: most recent activity."
             required
           />
         </div>

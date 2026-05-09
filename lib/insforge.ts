@@ -1,12 +1,7 @@
 import { createClient } from '@insforge/sdk';
-import { DEFAULT_AI_MODEL } from '@/lib/constants';
 
 let serverClient: ReturnType<typeof createClient> | null = null;
 let serverClientConfig: { baseUrl: string; anonKey: string } | null = null;
-
-export function getConfiguredModel() {
-  return process.env.INSFORGE_AI_MODEL?.trim() || DEFAULT_AI_MODEL;
-}
 
 function getInsforgeConfig() {
   const baseUrl = process.env.NEXT_PUBLIC_INSFORGE_URL;

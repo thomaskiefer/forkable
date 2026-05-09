@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getAuthenticatedSession } from '@/lib/auth-state';
-import { streamPlanningMessage } from '@/lib/feature-planning';
+import { streamImplementationMessage } from '@/lib/feature-planning';
 import { getChangeRequest } from '@/lib/queries';
 import type { ChangeRequest } from '@/lib/types';
 
@@ -28,7 +28,7 @@ export async function POST(
     return NextResponse.json({ error: 'Feature request not found.' }, { status: 404 });
   }
 
-  const stream = await streamPlanningMessage({
+  const stream = await streamImplementationMessage({
     request: changeRequest,
     text,
     userId: viewer.id,
