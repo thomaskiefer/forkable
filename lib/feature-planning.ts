@@ -328,10 +328,14 @@ async function streamRunnerImplementation(input: {
     },
   });
 
-  const reader = response.body?.getReader();
-  if (!response.ok || !reader) {
+  if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(runnerRequestError(endpoint, response.status, body.error));
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error(`Forkable runner request to ${endpoint} returned an empty stream.`);
   }
 
   const decoder = new TextDecoder();
@@ -544,15 +548,11 @@ function buildCodingAgentPrompt(
 
 function formatPlanForChat(plan: ChangeRequestPlan) {
   return [
-    'Draft plan',
+    'Ready to build',
     '',
     plan.summary,
     '',
-    'Implementation plan',
-    plan.implementation_plan,
-    '',
-    'Acceptance criteria',
-    ...plan.acceptance_criteria.map((criterion) => `- ${criterion}`),
+    'I have enough context to send this to the coding agent. I will keep the change scoped to your company, preserve the default CRM behavior for everyone else, and report back with the run when it is ready to review.',
   ].join('\n');
 }
 
