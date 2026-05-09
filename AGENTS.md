@@ -9,7 +9,7 @@ The core story is:
 1. A user signs in as a member of a company.
 2. That company describes a CRM workflow they need.
 3. Forkable turns the request into a chat-refined implementation plan.
-4. A coding agent uses Nia for codebase context and Hyperspell for company context.
+4. A coding agent uses Nia MCP for repo, docs, Slack, customer notes, and other indexed context before editing code. If Hyperspell is configured, it can be used as an additional customer-context source, but Nia is the default search layer.
 5. The agent builds the change on a Git branch and, when schema/RLS isolation matters, an InsForge backend branch.
 6. The system deploys a preview, runs smoke tests, and shows a developer review package.
 7. After approval, the change merges into the shared CRM and is enabled only for the requesting company through feature flags.
@@ -40,7 +40,7 @@ The intended end-to-end workflow is:
 4. `Send to agent` queues an agent run.
 5. The InsForge Compute runner claims the queued run.
 6. The runner clones the target CRM repo, checks out `feat/<feature>`, loads the plan, and invokes Codex with the user's Codex auth.
-7. The agent uses Nia before editing code and uses Hyperspell when company context is needed.
+7. The agent uses Nia MCP before editing code to search across the codebase, migrations, docs, Slack/customer context, and prior decisions. If Hyperspell is configured, use it only as supplemental customer context.
 8. The agent applies additive schema/UI/backend changes, preserving existing behavior for companies without the flag.
 9. Checks and smoke tests run.
 10. A preview and developer review package are produced.
@@ -62,8 +62,45 @@ Avoid copy that implies a human operator manually chooses a customer to receive 
 - Do not drop existing tables or columns unless explicitly requested.
 - Feature flags must not be frontend-only; backend enforcement is required for business rules.
 - Preserve behavior for companies without the flag.
+- Do not hard-code environment-specific UUIDs in migrations unless the migration is explicitly demo-data-only. Resolve the logged-in company through `company_account_members` and `company_accounts` wherever possible.
+- Company-scoped features must be enabled from the logged-in user's company mapping. Do not scope a company feature to the CRM deal's customer/account unless the request explicitly says the feature should apply only to that customer account.
+- When a feature affects a lead/deal detail page, verify the dashboard, detail page, API route, and backend RPC all use the same rollout model.
 - Keep the request planning UI minimal and chat-first.
 - Do not expose a feature-flags admin tab to end users.
 - Keep demo data and copy consistent with the company-account model.
 - Use `npx @insforge/cli`, not a global InsForge CLI.
 - Use InsForge Compute for background agent runs in this demo.
+
+## Required Context Search
+
+Before making implementation changes, use Nia MCP to gather context. Search at least:
+
+1. Relevant app routes and components.
+2. Existing query helpers and API routes.
+3. Existing migrations, RLS policies, and RPC functions.
+4. Feature flag helpers and company-account mapping.
+5. Slack/customer context and prior product decisions indexed in Nia.
+
+The agent handoff should mention what Nia context was checked. If Nia is unavailable, record that as a run risk and keep changes narrower.
+
+## Verification Rules
+
+Before marking an agent run as passed or ready to merge:
+
+- Run typecheck and production build on the pushed branch.
+- Browser-test the requesting company and a non-requesting company.
+- Confirm the requesting company sees the feature on every intended surface.
+- Confirm the non-requesting company does not see the feature.
+- Exercise at least one persisted action if the feature writes data.
+- For backend enforcement, test the blocked path or directly call the relevant API/RPC.
+- If InsForge backend branches or preview deployments are disabled, say so explicitly in the review package instead of implying they ran.
+- If the compute runner restarts or loses its active run during verification, do not leave the DB status as `running`. Mark the run failed or reconcile it only after independent verification is complete.
+
+## Common Failure To Avoid
+
+The product is an adaptable CRM for the logged-in company. A request from Acme means Acme's CRM behavior changes. It does not mean the feature should only appear on leads whose `company_name` is Acme. Always distinguish:
+
+- Requesting company: the authenticated user's company account.
+- CRM customer/deal account: the company represented by a lead, client, or project.
+
+Feature rollout uses the requesting company unless the request clearly asks for customer/deal-account-specific behavior.
