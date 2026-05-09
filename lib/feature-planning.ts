@@ -400,12 +400,15 @@ export async function streamImplementationMessage(input: {
       };
 
       return (async () => {
-        const savedUserMessages = await addPlanningMessages(
-          input.request.id,
-          [{ role: 'user', content: input.text }],
-          input.userId,
-          input.accessToken,
-        );
+        const userMessageText = input.text.trim();
+        const savedUserMessages = userMessageText
+          ? await addPlanningMessages(
+              input.request.id,
+              [{ role: 'user', content: userMessageText }],
+              input.userId,
+              input.accessToken,
+            )
+          : [];
         const userMessage = savedUserMessages[0] ?? null;
 
         writeEvent({ type: 'status', message: 'Drafting implementation handoff' });

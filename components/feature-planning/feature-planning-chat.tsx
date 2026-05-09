@@ -126,21 +126,27 @@ export function FeaturePlanningChat({
 
   async function sendMessage(text: string) {
     const trimmed = text.trim();
-    if (!trimmed || isSendingMessage) return;
+    if (isSendingMessage) return;
 
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    const userMessage = makePendingMessage('user', trimmed, nextSortOrder, request.id);
+    const userMessage = trimmed
+      ? makePendingMessage('user', trimmed, nextSortOrder, request.id)
+      : null;
     const initialAssistantMessage = makePendingMessage(
       'assistant',
       'Preparing the build...',
-      nextSortOrder + 1,
+      nextSortOrder + (userMessage ? 1 : 0),
       request.id,
     );
     let activeAssistantMessage = initialAssistantMessage;
-    setMessages((current) => [...current, userMessage, initialAssistantMessage]);
+    setMessages((current) => [
+      ...current,
+      ...(userMessage ? [userMessage] : []),
+      initialAssistantMessage,
+    ]);
     setInput('');
     setIsSendingMessage(true);
     setPlanningStatus('Queuing coding agent run');
@@ -149,7 +155,7 @@ export function FeaturePlanningChat({
       const response = await fetch(`/api/feature-requests/${request.id}/planning-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify({ message: trimmed || undefined }),
         signal: controller.signal,
       });
 
@@ -251,7 +257,7 @@ export function FeaturePlanningChat({
         if (hasInlineError) return current;
 
         return current.map((message): PlanningErrorMessage =>
-          message.id === userMessage.id
+          userMessage && message.id === userMessage.id
             ? { ...message, pending: false }
             : message.id === activeAssistantMessage.id
             ? {
@@ -292,10 +298,9 @@ export function FeaturePlanningChat({
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 ? (
-          <div className="space-y-2 text-sm text-muted-foreground">
-            <p>Coding agent ready.</p>
-            <p>Send the workflow request when you are ready to build it.</p>
-          </div>
+          <p className="text-sm text-muted-foreground">
+            The coding agent can build from the request as written. Add a note only if there is something else it should know.
+          </p>
         ) : (
           messages.map((message) => <MessageBubble key={message.id} message={message} />)
         )}
@@ -324,7 +329,7 @@ export function FeaturePlanningChat({
           <Textarea
             value={input}
             onChange={(event) => setInput(event.currentTarget.value)}
-            placeholder="Tell the coding agent what to build..."
+            placeholder="Optional note for the coding agent..."
             className="max-h-32 min-h-16 resize-none bg-card dark:border-white/12 dark:bg-white/[0.08] dark:text-white dark:placeholder:text-white/35"
             disabled={isSendingMessage}
           />
@@ -333,7 +338,7 @@ export function FeaturePlanningChat({
               {currentRun ? `Latest run: ${statusLabel(currentRun.status)}` : 'No run queued'}
             </div>
             <div className="flex gap-2">
-              <Button type="submit" disabled={!input.trim() || isSendingMessage}>
+              <Button type="submit" disabled={isSendingMessage}>
                 {isSendingMessage ? <Loader2 className="animate-spin" /> : null}
                 Build feature
               </Button>

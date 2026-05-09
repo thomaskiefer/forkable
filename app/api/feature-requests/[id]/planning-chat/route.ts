@@ -18,10 +18,7 @@ export async function POST(
   }
 
   const body = (await request.json()) as { message?: string };
-  const text = body.message?.trim();
-  if (!text) {
-    return NextResponse.json({ error: 'message is required.' }, { status: 400 });
-  }
+  const text = body.message?.trim() ?? '';
 
   const changeRequest = (await getChangeRequest(id, accessToken)) as ChangeRequest | null;
   if (!changeRequest) {
