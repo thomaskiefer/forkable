@@ -23,12 +23,12 @@ export default async function SignInPage() {
             <AuthShowcase
               quote={
                 <>
-                  Welcome to your
+                  Tell us how your
                   <br />
-                  <em className="not-italic">&ldquo;<span className="italic text-primary">personalized</span>&rdquo;</em> CRM.
+                  CRM should work.
                 </>
               }
-              description="CRM software that adapts to the way your team sells."
+              description="CRM software that adapts to the way your company sells."
             />
           </section>
 
@@ -42,7 +42,7 @@ export default async function SignInPage() {
                   Welcome back
                 </h2>
                 <p className="text-sm leading-6 text-white/60">
-                  Return to your CRM.
+                  Return to your personalized CRM.
                 </p>
               </div>
 

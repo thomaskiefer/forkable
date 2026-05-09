@@ -1,6 +1,6 @@
 # Forkable
 
-Forkable is a customizable sales workspace for teams with customer-specific workflows.
+Forkable is a customizable sales workspace for companies with customer-specific workflows.
 
 It starts with the everyday sales surface: leads, pipeline stages, clients,
 projects, follow-ups, documents, auth, persistence, and row-level security. The
@@ -10,7 +10,7 @@ for the right account.
 
 ## Product Positioning
 
-Forkable is for teams that want their sales system to match how they sell instead of
+Forkable is for companies that want their sales system to match how they sell instead of
 forcing every customer workflow through a generic process.
 
 - Customize fields, stages, qualification rules, approval gates, and dashboards.
@@ -21,13 +21,13 @@ forcing every customer workflow through a generic process.
 
 ## Demo Flow
 
-The included demo shows a company/team-scoped rollout workflow:
+The included demo shows a company-scoped rollout workflow:
 
-1. Shopify Enterprise Sales requests Legal Review for deals over $50k.
+1. Shopify requests Legal Review for deals over $50k.
 2. Forkable records the request and creates a safe implementation run.
 3. The change is built on a Git branch and InsForge backend branch.
 4. A preview deployment and smoke-test checklist are attached to the review.
-5. The developer approves the change and enables it only for the right company/team.
+5. The developer approves the change and enables it only for the right company.
 6. Stripe and other accounts keep the standard product behavior.
 
 ## Stack
@@ -74,6 +74,7 @@ npx @insforge/cli db import migrations/20260509201000_customer_scoped_feature_fl
 npx @insforge/cli db import migrations/20260509212000_realistic_company_team_demo.sql
 npx @insforge/cli db import migrations/20260509213000_scheduled-agent-tasks.sql
 npx @insforge/cli db import migrations/20260509214000_remove_project_codes.sql
+npx @insforge/cli db import migrations/20260509220000_company_scoped_flags.sql
 ```
 
 Run the app:

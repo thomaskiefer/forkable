@@ -26,7 +26,7 @@ const fraunces = Fraunces({
 
 export const metadata: Metadata = {
   title: 'Forkable',
-  description: 'CRM software that adapts to the way your team sells.',
+  description: 'CRM software that adapts to the way your company sells.',
   icons: {
     icon: [
       { url: '/favicon.svg', type: 'image/svg+xml' },

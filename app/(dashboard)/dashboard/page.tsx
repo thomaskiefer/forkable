@@ -1,11 +1,20 @@
 import Link from 'next/link';
-import { ArrowUpRight, GitPullRequestArrow, KanbanSquare, Plus, Target, Users } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  CalendarClock,
+  GitPullRequestArrow,
+  KanbanSquare,
+  Plus,
+  Target,
+  Users,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
-import { getChangeRequests, getClients, getLeadStages, getLeads } from '@/lib/queries';
+import { getChangeRequests, getClients, getLeadStages, getLeads, getProjects } from '@/lib/queries';
 import { cn } from '@/lib/utils';
 
 const currency = new Intl.NumberFormat('en-US', {
@@ -21,14 +30,55 @@ const compactCurrency = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 1,
 });
 
+const forecastWeights: Record<string, number> = {
+  'New Lead': 0.1,
+  Contacted: 0.2,
+  Discovery: 0.35,
+  Qualified: 0.5,
+  Proposal: 0.65,
+  'Security Review': 0.7,
+  'Contract Sent': 0.85,
+  'Closed Won': 1,
+  Lost: 0,
+};
+
+const ownerPool = ['Nia Grant', 'Maya Patel', 'Theo Brooks', 'Ari Chen'];
+
+function stringScore(value: string) {
+  return [...value].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+}
+
+function getStageName(lead: Record<string, unknown>) {
+  return (
+    (lead.current_stage as Record<string, string> | undefined)?.name ??
+    (lead.status as string)
+  );
+}
+
+function daysSince(value: unknown) {
+  if (typeof value !== 'string') return 0;
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return 0;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 86_400_000));
+}
+
+function daysFromLead(lead: Record<string, unknown>, baseDays: number) {
+  return baseDays + (stringScore(String(lead.id)) % 18);
+}
+
+function getOwner(id: unknown) {
+  return ownerPool[stringScore(String(id)) % ownerPool.length];
+}
+
 export default async function CRMOverviewPage() {
   const { accessToken: token } = await requireAuthenticatedSession();
 
-  const [leadsResult, clientsResult, stages, featureRequests] = await Promise.all([
+  const [leadsResult, clientsResult, stages, featureRequests, projectsResult] = await Promise.all([
     getLeads(token, 1, 50),
     getClients(token),
     getLeadStages(token),
     getChangeRequests(token),
+    getProjects(token, 1, 50),
   ]);
 
   const allLeads = leadsResult.leads as Array<Record<string, unknown>>;
@@ -36,6 +86,35 @@ export default async function CRMOverviewPage() {
     (sum, lead) => sum + (typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0),
     0,
   );
+  const openLeads = allLeads.filter((lead) => {
+    const stageName = getStageName(lead);
+    return stageName !== 'Closed Won' && stageName !== 'Lost';
+  });
+  const weightedPipelineValue = openLeads.reduce((sum, lead) => {
+    const dealValue = typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0;
+    return sum + dealValue * (forecastWeights[getStageName(lead)] ?? 0.25);
+  }, 0);
+  const staleDeals = openLeads
+    .map((lead) => ({
+      lead,
+      stageName: getStageName(lead),
+      age: daysSince(lead.updated_at),
+      nextTouchDays: daysFromLead(lead, -3),
+    }))
+    .filter((item) => item.age >= 7 || item.nextTouchDays <= 0)
+    .sort((a, b) => b.age - a.age)
+    .slice(0, 4);
+  const atRiskDeals = openLeads
+    .filter((lead) => ['Security Review', 'Contract Sent', 'Proposal'].includes(getStageName(lead)))
+    .sort((a, b) => {
+      const aValue = typeof a.deal_value === 'number' ? (a.deal_value as number) : 0;
+      const bValue = typeof b.deal_value === 'number' ? (b.deal_value as number) : 0;
+      return bValue - aValue;
+    })
+    .slice(0, 4);
+  const projectQueue = (projectsResult.projects as Array<Record<string, unknown>>)
+    .filter((project) => (project.deal_status as string) !== 'completed')
+    .slice(0, 4);
 
   // Distribution by stage — used as a typographic sparkline
   const stageDistribution = stages.map((stage) => {
@@ -58,14 +137,29 @@ export default async function CRMOverviewPage() {
     },
   ];
 
-  const recentLeads = allLeads.slice(0, 5);
+  const forecastByStage = stageDistribution
+    .map((stage) => {
+      const stageLeads = allLeads.filter(
+        (lead) => (lead.current_stage_id as string) === stage.id,
+      );
+      const raw = stageLeads.reduce(
+        (sum, lead) => sum + (typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0),
+        0,
+      );
+      return {
+        ...stage,
+        raw,
+        weighted: raw * (forecastWeights[stage.name] ?? 0.25),
+      };
+    })
+    .filter((stage) => stage.raw > 0);
 
   return (
     <div className="stagger space-y-8">
       <PageHeader
         eyebrow="Overview"
         title="Your pipeline"
-        description="Track deals, customer rollouts, and feature requests in one place."
+        description="A working queue for deals, customer rollouts, and feature requests that need attention."
         actions={
           <Link href="/leads/add">
             <Button size="lg" className="gap-2">
@@ -93,7 +187,7 @@ export default async function CRMOverviewPage() {
             </div>
             <p className="mt-4 max-w-md text-sm text-muted-foreground">
               {allLeads.length > 0
-                ? `${allLeads.length} active leads across ${stages.length} stages.`
+                ? `${openLeads.length} open deals · ${currency.format(weightedPipelineValue)} weighted forecast.`
                 : 'Add a lead to start tracking deal value across your pipeline.'}
             </p>
             <div className="mt-auto flex flex-wrap gap-3 pt-8">
@@ -149,6 +243,97 @@ export default async function CRMOverviewPage() {
         </div>
       </section>
 
+      <section className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <Card className="p-0">
+          <CardContent className="p-6">
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <div>
+                <p className="eyebrow">Needs attention</p>
+                <h2 className="mt-1 font-display text-2xl font-medium tracking-tight">
+                  Stale or overdue deals
+                </h2>
+              </div>
+              <CalendarClock className="h-4 w-4 text-muted-foreground" />
+            </div>
+            {staleDeals.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No stale deals in the current view.</p>
+            ) : (
+              <div className="divide-y">
+                {staleDeals.map(({ lead, stageName, age, nextTouchDays }) => {
+                  const dealValue = typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0;
+                  return (
+                    <Link
+                      key={lead.id as string}
+                      href={`/leads/${lead.id}`}
+                      className="group grid gap-3 py-4 first:pt-0 last:pb-0 sm:grid-cols-[1fr_auto] sm:items-center"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{lead.company_name as string}</p>
+                        <p className="truncate text-sm text-muted-foreground">
+                          {stageName} · {getOwner(lead.id)} · last update {age}d ago
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3 sm:justify-end">
+                        <span className="font-display nums-tabular text-base font-medium tabular-nums">
+                          {currency.format(dealValue)}
+                        </span>
+                        <span
+                          className={cn(
+                            'rounded-full border px-2.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-[0.16em]',
+                            nextTouchDays <= 0
+                              ? 'border-destructive/30 bg-destructive/10 text-destructive'
+                              : 'border-chart-2/30 bg-chart-2/10 text-chart-2',
+                          )}
+                        >
+                          {nextTouchDays <= 0 ? 'follow up due' : 'stale'}
+                        </span>
+                        <ArrowUpRight className="h-4 w-4 text-muted-foreground transition-all group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-primary" />
+                      </div>
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="p-0">
+          <CardContent className="p-6">
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <div>
+                <p className="eyebrow">Forecast</p>
+                <h2 className="mt-1 font-display text-2xl font-medium tracking-tight">
+                  Weighted by stage
+                </h2>
+              </div>
+              <p className="font-display nums-tabular text-xl font-medium tabular-nums">
+                {compactCurrency.format(weightedPipelineValue)}
+              </p>
+            </div>
+            <div className="space-y-3">
+              {forecastByStage.slice(0, 6).map((stage) => (
+                <div key={stage.id} className="space-y-1">
+                  <div className="flex items-baseline justify-between gap-3 text-sm">
+                    <span className="truncate text-foreground">{stage.name}</span>
+                    <span className="font-display nums-tabular text-sm font-medium tabular-nums text-muted-foreground">
+                      {compactCurrency.format(stage.weighted)}
+                    </span>
+                  </div>
+                  <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary"
+                      style={{
+                        width: `${Math.max(4, (stage.weighted / Math.max(1, weightedPipelineValue)) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
       {/* Demoted secondary stats */}
       <section>
         <div className="grid gap-px overflow-hidden rounded-2xl border bg-border sm:grid-cols-2 lg:grid-cols-4">
@@ -170,10 +355,92 @@ export default async function CRMOverviewPage() {
         </div>
       </section>
 
-      {/* Recent leads */}
+      <section className="grid gap-4 lg:grid-cols-2">
+        <Card className="p-0">
+          <CardContent className="p-6">
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <div>
+                <p className="eyebrow">Risk</p>
+                <h2 className="mt-1 font-display text-2xl font-medium tracking-tight">
+                  High-value blockers
+                </h2>
+              </div>
+              <AlertTriangle className="h-4 w-4 text-chart-2" />
+            </div>
+            <div className="space-y-3">
+              {atRiskDeals.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No high-value late-stage blockers.</p>
+              ) : (
+                atRiskDeals.map((lead) => (
+                  <Link
+                    key={lead.id as string}
+                    href={`/leads/${lead.id}`}
+                    className="group flex items-center justify-between gap-4 rounded-lg border bg-card px-4 py-3 transition-colors hover:bg-accent/40"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{lead.company_name as string}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {getStageName(lead)} · close plan due in {daysFromLead(lead, 7)}d
+                      </p>
+                    </div>
+                    <span className="font-display nums-tabular shrink-0 text-base font-medium tabular-nums">
+                      {currency.format(typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0)}
+                    </span>
+                  </Link>
+                ))
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="p-0">
+          <CardContent className="p-6">
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <div>
+                <p className="eyebrow">Delivery</p>
+                <h2 className="mt-1 font-display text-2xl font-medium tracking-tight">
+                  Active rollout queue
+                </h2>
+              </div>
+              <Link
+                href="/projects"
+                className="text-sm text-muted-foreground transition-colors hover:text-primary"
+              >
+                View projects →
+              </Link>
+            </div>
+            <div className="space-y-3">
+              {projectQueue.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active customer rollouts.</p>
+              ) : (
+                projectQueue.map((project) => {
+                  const clientName = (project.client as Record<string, string> | undefined)?.name;
+                  return (
+                    <div
+                      key={project.id as string}
+                      className="grid gap-3 rounded-lg border bg-card px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{project.name as string}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {clientName ?? 'Client'} · {getOwner(project.id)} · milestone in {daysFromLead(project, 5)}d
+                        </p>
+                      </div>
+                      <span className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-[0.16em] text-primary">
+                        {(project.deal_status as string).replace('_', ' ')}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
       <section className="space-y-4">
         <div className="flex items-baseline justify-between">
-          <h2 className="font-display text-2xl font-medium tracking-tight">Recent leads</h2>
+          <h2 className="font-display text-2xl font-medium tracking-tight">Recently opened deals</h2>
           <Link
             href="/leads"
             className="text-sm text-muted-foreground transition-colors hover:text-primary"
@@ -182,7 +449,7 @@ export default async function CRMOverviewPage() {
           </Link>
         </div>
 
-        {recentLeads.length === 0 ? (
+        {allLeads.slice(0, 5).length === 0 ? (
           <EmptyState
             icon={Target}
             eyebrow="No leads yet"
@@ -200,7 +467,7 @@ export default async function CRMOverviewPage() {
           <Card className="overflow-hidden p-0">
             <CardContent className="p-0">
               <div className="divide-y">
-                {recentLeads.map((lead) => {
+                {allLeads.slice(0, 5).map((lead) => {
                   const stageName =
                     (lead.current_stage as Record<string, string> | undefined)?.name ??
                     (lead.status as string);

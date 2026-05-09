@@ -32,7 +32,7 @@ const config = {
   requireBackendBranch: process.env.FORKABLE_REQUIRE_BACKEND_BRANCH === 'true',
   deployPreview: process.env.FORKABLE_DEPLOY_PREVIEW === 'true',
   codexModel: process.env.CODEX_MODEL || 'gpt-5.5',
-  codexReasoningEffort: process.env.CODEX_REASONING_EFFORT || 'medium',
+  codexReasoningEffort: process.env.CODEX_REASONING_EFFORT || 'low',
   checks: parseCommandList(process.env.FORKABLE_CHECK_COMMANDS || ''),
 };
 

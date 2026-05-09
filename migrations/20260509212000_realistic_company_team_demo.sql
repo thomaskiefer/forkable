@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS public.company_account_members (
   email text NOT NULL,
   full_name text NOT NULL,
   title text,
-  team_name text NOT NULL DEFAULT 'All teams',
   account_role text NOT NULL DEFAULT 'Member',
   is_demo_login boolean NOT NULL DEFAULT false,
   user_id uuid NOT NULL,
@@ -48,15 +47,13 @@ CREATE TABLE IF NOT EXISTS public.company_feature_flags (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   company_account_id uuid NOT NULL REFERENCES public.company_accounts(id) ON DELETE CASCADE,
   feature_key text NOT NULL REFERENCES public.feature_flags(key) ON DELETE CASCADE,
-  team_name text NOT NULL DEFAULT 'All teams',
   enabled boolean NOT NULL DEFAULT false,
   rollout_stage text NOT NULL DEFAULT 'disabled',
   notes text,
   user_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT company_feature_flags_team_not_blank CHECK (btrim(team_name) <> ''),
-  CONSTRAINT company_feature_flags_unique UNIQUE (company_account_id, feature_key, team_name, user_id)
+  CONSTRAINT company_feature_flags_unique UNIQUE (company_account_id, feature_key, user_id)
 );
 
 ALTER TABLE public.leads
@@ -75,8 +72,7 @@ ALTER TABLE public.change_requests
     FOREIGN KEY (company_account_id) REFERENCES public.company_accounts(id) ON DELETE SET NULL;
 
 ALTER TABLE public.customer_feature_flags
-  ADD COLUMN IF NOT EXISTS company_account_id uuid,
-  ADD COLUMN IF NOT EXISTS team_name text NOT NULL DEFAULT 'All teams';
+  ADD COLUMN IF NOT EXISTS company_account_id uuid;
 
 ALTER TABLE public.customer_feature_flags
   DROP CONSTRAINT IF EXISTS customer_feature_flags_company_account_id_fkey,
@@ -86,7 +82,7 @@ ALTER TABLE public.customer_feature_flags
 CREATE INDEX IF NOT EXISTS company_accounts_user_idx
   ON public.company_accounts (user_id, name);
 CREATE INDEX IF NOT EXISTS company_account_members_company_idx
-  ON public.company_account_members (company_account_id, team_name);
+  ON public.company_account_members (company_account_id);
 CREATE INDEX IF NOT EXISTS company_account_members_email_idx
   ON public.company_account_members (user_id, lower(email));
 CREATE INDEX IF NOT EXISTS company_feature_flags_company_idx
@@ -142,7 +138,6 @@ AS $$
      AND flag.enabled = true
     WHERE member.user_id = p_user_id
       AND lower(member.email) = lower(coalesce(p_user_email, ''))
-      AND (flag.team_name = 'All teams' OR flag.team_name = member.team_name)
   );
 $$;
 
@@ -195,12 +190,6 @@ AS $$
        AND flag.user_id = p_user_id
        AND flag.feature_key = p_feature_key
        AND flag.enabled = true
-      LEFT JOIN public.company_account_members member
-        ON member.company_account_id = lead.company_account_id
-       AND member.user_id = p_user_id
-       AND lower(member.email) = lower(coalesce(lead.contact_email, ''))
-      WHERE flag.team_name = 'All teams'
-         OR flag.team_name = member.team_name
     )
     OR EXISTS (
       SELECT 1
@@ -362,26 +351,25 @@ BEGIN
     SELECT *
     FROM (
       VALUES
-        ('shopify', 'enterprise_deal_approvals', 'Enterprise Sales', true, 'preview', 'Enterprise sellers need legal approval evidence before late-stage movement.'),
-        ('shopify', 'implementation_risk_scoring', 'All teams', true, 'enabled', 'Risk score is visible on strategic opportunities.'),
-        ('stripe', 'enterprise_deal_approvals', 'All teams', false, 'disabled', 'Stripe remains on the standard CRM flow for approval gating.'),
-        ('stripe', 'regional_pipeline_views', 'Revenue Operations', true, 'planning', 'Revenue Ops is validating regional forecast filters.'),
-        ('datadog', 'implementation_risk_scoring', 'All teams', true, 'enabled', 'Launch risk score informs the enterprise expansion forecast.'),
-        ('figma', 'enterprise_deal_approvals', 'All teams', false, 'disabled', 'Figma is the clean control account for the approval workflow.'),
-        ('snowflake', 'enterprise_deal_approvals', 'All teams', true, 'enabled', 'Large data-cloud expansion deals require legal approval.'),
-        ('cloudflare', 'security_questionnaire_workspace', 'Security', true, 'requested', 'Security team wants questionnaire ownership and audit history.'),
-        ('plaid', 'regional_pipeline_views', 'All teams', true, 'enabled', 'Regional forecast views are enabled for account planning.'),
-        ('instacart', 'regional_pipeline_views', 'Enterprise Sales', true, 'planning', 'Sales leadership is piloting market-level pipeline rollups.'),
-        ('atlassian', 'enterprise_deal_approvals', 'Enterprise Sales', true, 'preview', 'Enterprise Sales is testing the approval gate.'),
-        ('hubspot', 'enterprise_deal_approvals', 'All teams', false, 'disabled', 'HubSpot remains a standard-product control account.'),
-        ('canva', 'implementation_risk_scoring', 'Customer Success', true, 'enabled', 'CS uses risk scoring to time expansion workshops.'),
-        ('ramp', 'security_questionnaire_workspace', 'Security', true, 'planning', 'Security packet review is being structured for finance buyers.')
-    ) AS flags(company_slug, feature_key, team_name, enabled, rollout_stage, notes)
+        ('shopify', 'enterprise_deal_approvals', true, 'preview', 'Shopify needs legal approval evidence before late-stage movement.'),
+        ('shopify', 'implementation_risk_scoring', true, 'enabled', 'Risk score is visible on strategic opportunities.'),
+        ('stripe', 'enterprise_deal_approvals', false, 'disabled', 'Stripe remains on the standard CRM flow for approval gating.'),
+        ('stripe', 'regional_pipeline_views', true, 'planning', 'Stripe is validating regional forecast filters.'),
+        ('datadog', 'implementation_risk_scoring', true, 'enabled', 'Launch risk score informs the enterprise expansion forecast.'),
+        ('figma', 'enterprise_deal_approvals', false, 'disabled', 'Figma is the clean control account for the approval workflow.'),
+        ('snowflake', 'enterprise_deal_approvals', true, 'enabled', 'Large data-cloud expansion deals require legal approval.'),
+        ('cloudflare', 'security_questionnaire_workspace', true, 'requested', 'Cloudflare wants questionnaire ownership and audit history.'),
+        ('plaid', 'regional_pipeline_views', true, 'enabled', 'Regional forecast views are enabled for account planning.'),
+        ('instacart', 'regional_pipeline_views', true, 'planning', 'Instacart is piloting market-level pipeline rollups.'),
+        ('atlassian', 'enterprise_deal_approvals', true, 'preview', 'Atlassian is testing the approval gate.'),
+        ('hubspot', 'enterprise_deal_approvals', false, 'disabled', 'HubSpot remains a standard-product control account.'),
+        ('canva', 'implementation_risk_scoring', true, 'enabled', 'Canva uses risk scoring to time expansion workshops.'),
+        ('ramp', 'security_questionnaire_workspace', true, 'planning', 'Ramp packet review is being structured for finance buyers.')
+    ) AS flags(company_slug, feature_key, enabled, rollout_stage, notes)
   ), resolved AS (
     SELECT
       accounts.id AS company_account_id,
       seeded_flags.feature_key,
-      seeded_flags.team_name,
       seeded_flags.enabled,
       seeded_flags.rollout_stage,
       seeded_flags.notes
@@ -393,7 +381,6 @@ BEGIN
   INSERT INTO public.company_feature_flags (
     company_account_id,
     feature_key,
-    team_name,
     enabled,
     rollout_stage,
     notes,
@@ -402,13 +389,12 @@ BEGIN
   SELECT
     company_account_id,
     feature_key,
-    team_name,
     enabled,
     rollout_stage,
     notes,
     p_user_id
   FROM resolved
-  ON CONFLICT (company_account_id, feature_key, team_name, user_id)
+  ON CONFLICT (company_account_id, feature_key, user_id)
   DO UPDATE SET
     enabled = EXCLUDED.enabled,
     rollout_stage = EXCLUDED.rollout_stage,
@@ -437,7 +423,6 @@ BEGIN
       emails.customer_email,
       flags.company_account_id,
       flags.feature_key,
-      flags.team_name,
       flags.enabled
     FROM company_emails emails
     JOIN public.company_accounts accounts
@@ -451,7 +436,6 @@ BEGIN
     customer_email,
     company_account_id,
     feature_key,
-    team_name,
     enabled,
     user_id
   )
@@ -459,14 +443,12 @@ BEGIN
     customer_email,
     company_account_id,
     feature_key,
-    team_name,
     enabled,
     p_user_id
   FROM enabled_flags
   ON CONFLICT (customer_email, feature_key, user_id)
   DO UPDATE SET
     company_account_id = EXCLUDED.company_account_id,
-    team_name = EXCLUDED.team_name,
     enabled = EXCLUDED.enabled;
 
   WITH seeded_requests AS (
@@ -593,7 +575,7 @@ BEGIN
         'shopify-approval-gate',
         'https://preview.forkable.site/shopify-approval-gate',
         now() - interval '1 day',
-        'Added company/team feature flags, approval persistence, backend enforcement, lead-detail approval actions, and Shopify/Stripe smoke coverage.',
+        'Added company feature flags, approval persistence, backend enforcement, lead-detail approval actions, and Shopify/Stripe smoke coverage.',
         'https://github.com/forkable/demo/pull/58',
         '9c2f7ba',
         p_user_id
@@ -607,11 +589,11 @@ BEGIN
       INSERT INTO public.agent_steps (run_id, order_index, label, status, details, completed_at, user_id)
       VALUES
         (v_run_id, 1, 'Indexed CRM repo and seed migrations', 'passed', 'Found lead pipeline, approval RPCs, company accounts, and feature flag tables.', now() - interval '1 day 4 hours', p_user_id),
-        (v_run_id, 2, 'Created Git branch feat/shopify-approval-gate', 'passed', 'Prepared additive schema changes for company/team rollout.', now() - interval '1 day 3 hours 40 minutes', p_user_id),
+        (v_run_id, 2, 'Created Git branch feat/shopify-approval-gate', 'passed', 'Prepared additive schema changes for company rollout.', now() - interval '1 day 3 hours 40 minutes', p_user_id),
         (v_run_id, 3, 'Created InsForge backend branch shopify-approval-gate', 'passed', 'Validated branch data against Shopify and Stripe demo accounts.', now() - interval '1 day 3 hours 20 minutes', p_user_id),
         (v_run_id, 4, 'Added approval tables and policies', 'passed', 'Approval request, step, and audit tables remain user-scoped.', now() - interval '1 day 2 hours 55 minutes', p_user_id),
-        (v_run_id, 5, 'Enforced blocked stage transitions', 'passed', 'Blocked high-value Shopify Enterprise Sales deals until Legal Review is approved.', now() - interval '1 day 2 hours 20 minutes', p_user_id),
-        (v_run_id, 6, 'Updated lead detail review flow', 'passed', 'Approval UI appears only when the lead company/team flag is enabled.', now() - interval '1 day 1 hour 50 minutes', p_user_id),
+        (v_run_id, 5, 'Enforced blocked stage transitions', 'passed', 'Blocked high-value Shopify deals until Legal Review is approved.', now() - interval '1 day 2 hours 20 minutes', p_user_id),
+        (v_run_id, 6, 'Updated lead detail review flow', 'passed', 'Approval UI appears only when the lead company flag is enabled.', now() - interval '1 day 1 hour 50 minutes', p_user_id),
         (v_run_id, 7, 'Deployed preview', 'passed', 'Preview is ready for product review.', now() - interval '1 day 1 hour 20 minutes', p_user_id),
         (v_run_id, 8, 'Ran smoke tests: 8/8 passed', 'passed', 'Verified Shopify-specific behavior and unchanged Stripe behavior.', now() - interval '1 day', p_user_id);
     END IF;
@@ -645,7 +627,7 @@ BEGIN
         (v_run_id, 'Base app loads', 'passed', 'CRM dashboard rendered with the realistic company demo pipeline.', p_user_id),
         (v_run_id, 'Shopify demo user is assigned', 'passed', 'shopify@forkable.site resolves to the Shopify company account.', p_user_id),
         (v_run_id, 'Stripe demo user is assigned', 'passed', 'stripe@forkable.site resolves to the Stripe company account.', p_user_id),
-        (v_run_id, 'Shopify Enterprise Sales sees approval feature', 'passed', 'Feature flag resolved true for enterprise_deal_approvals.', p_user_id),
+        (v_run_id, 'Shopify sees approval feature', 'passed', 'Feature flag resolved true for enterprise_deal_approvals.', p_user_id),
         (v_run_id, 'Stripe does not see approval feature', 'passed', 'Feature flag resolved false, preserving the standard CRM flow.', p_user_id),
         (v_run_id, 'Shopify deal over $50k is blocked without approval', 'passed', 'Database RPC raised Legal Review required.', p_user_id),
         (v_run_id, 'Approval request can be created', 'passed', 'Request and audit rows persisted.', p_user_id),
@@ -715,18 +697,17 @@ BEGIN
   SELECT
     v_request_id,
     'finalized',
-    'Add company/team-scoped regional pipeline views for Stripe Revenue Operations.',
-    '1. Inspect lead, dashboard, and pipeline queries.\n2. Add additive region metadata only.\n3. Gate the regional view behind Stripe Revenue Operations company/team flags.\n4. Preserve the standard CRM experience for companies without the flag.\n5. Run Stripe and Shopify smoke tests before review.',
+    'Add company-scoped regional pipeline views for Stripe.',
+    '1. Inspect lead, dashboard, and pipeline queries.\n2. Add additive region metadata only.\n3. Gate the regional view behind Stripe company flags.\n4. Preserve the standard CRM experience for companies without the flag.\n5. Run Stripe and Shopify smoke tests before review.',
     ARRAY[
-      'Stripe Revenue Operations sees regional pipeline views.',
+      'Stripe sees regional pipeline views.',
       'Companies without the regional_pipeline_views flag keep the standard pipeline.',
       'The regional view groups active opportunities by North America, EMEA, and APAC.',
       'No approval-gate behavior is enabled for Stripe.'
     ],
-    'Use Nia to inspect this CRM repo before making changes. Implement regional_pipeline_views for Stripe Revenue Operations only. Prefer additive migrations, preserve existing behavior, and return exact changed files plus smoke test results.',
+    'Use Nia to inspect this CRM repo before making changes. Implement regional_pipeline_views for Stripe only. Prefer additive migrations, preserve existing behavior, and return exact changed files plus smoke test results.',
     jsonb_build_object(
       'customer', 'Stripe',
-      'team', 'Revenue Operations',
       'feature_key', 'regional_pipeline_views',
       'context_sources', jsonb_build_array('planning_chat', 'change_request', 'company_account_membership')
     ),
@@ -784,14 +765,14 @@ BEGIN
       (
         v_request_id,
         'user',
-        'Keep it Shopify Enterprise Sales only, require backend enforcement, and make sure Stripe keeps the normal CRM behavior.',
+        'Keep it Shopify only, require backend enforcement, and make sure Stripe keeps the normal CRM behavior.',
         1,
         p_user_id
       ),
       (
         v_request_id,
         'assistant',
-        'Understood. The plan should add a Shopify Enterprise Sales company/team feature flag, approval persistence, database enforcement for high-value stage moves, a small approval UI on lead detail, and smoke tests that prove Shopify and Stripe diverge only where intended.',
+        'Understood. The plan should add a Shopify company feature flag, approval persistence, database enforcement for high-value stage moves, a small approval UI on lead detail, and smoke tests that prove Shopify and Stripe diverge only where intended.',
         2,
         p_user_id
       );
@@ -811,19 +792,18 @@ BEGIN
   VALUES (
     v_request_id,
     'finalized',
-    'Add a Shopify Enterprise Sales approval workflow for deals over $50k before Contract Sent or Closed Won.',
-    '1. Use Nia to inspect the CRM pipeline, lead detail, migrations, RLS patterns, and company-account membership model.\n2. Add additive approval and company/team feature flag schema only.\n3. Enforce blocked stage transitions in the backend stage-update RPC.\n4. Add a lead-detail approval request and status UI only when the lead company/team flag is enabled.\n5. Run Shopify/Stripe smoke tests before review.',
+    'Add a Shopify approval workflow for deals over $50k before Contract Sent or Closed Won.',
+    '1. Use Nia to inspect the CRM pipeline, lead detail, migrations, RLS patterns, and company-account membership model.\n2. Add additive approval and company feature flag schema only.\n3. Enforce blocked stage transitions in the backend stage-update RPC.\n4. Add a lead-detail approval request and status UI only when the lead company flag is enabled.\n5. Run Shopify/Stripe smoke tests before review.',
     ARRAY[
-      'Shopify Enterprise Sales sees the approval workflow for deals over $50k.',
+      'Shopify sees the approval workflow for deals over $50k.',
       'Stripe keeps the normal CRM behavior with no approval UI.',
-      'A high-value Shopify Enterprise Sales deal cannot move to Contract Sent or Closed Won without approved legal review.',
+      'A high-value Shopify deal cannot move to Contract Sent or Closed Won without approved legal review.',
       'Approval request and approval audit events persist.',
       'Approved high-value Shopify deal can advance.'
     ],
-    'Use Nia to inspect this CRM repo before making changes. Implement enterprise_deal_approvals for Shopify Enterprise Sales only. Prefer additive migrations, preserve existing behavior, enforce the gate in the backend stage-update path, add lead-detail UI, and return exact changed files plus smoke test results.',
+    'Use Nia to inspect this CRM repo before making changes. Implement enterprise_deal_approvals for Shopify only. Prefer additive migrations, preserve existing behavior, enforce the gate in the backend stage-update path, add lead-detail UI, and return exact changed files plus smoke test results.',
     jsonb_build_object(
       'customer', 'Shopify',
-      'team', 'Enterprise Sales',
       'feature_key', 'enterprise_deal_approvals',
       'context_sources', jsonb_build_array('planning_chat', 'change_request', 'company_account_membership', 'Nia repo inspection')
     ),
@@ -878,42 +858,42 @@ DECLARE
   $json$::jsonb;
   v_leads jsonb := $json$
   [
-    {"company_slug":"shopify","company_name":"Shopify","industry":"Commerce platform","website":"https://www.shopify.com","contact_name":"Morgan Lee","contact_title":"VP Enterprise Sales","team_name":"Enterprise Sales","contact_email":"morgan.lee.shopify@forkable.site","contact_phone":"+1 416 555 0112","source_name":"Executive Intro","stage_name":"Proposal","status":"qualified","score":94,"deal_value":186000,"notes":"Enterprise Sales wants legal approval evidence before late-stage movement. Procurement is aligned if audit history is available in the CRM.","tags":"enterprise-sales,approval-gate","created_days_ago":19,"updated_days_ago":1,"activity_subject":"Approval workflow workshop","activity_detail":"Reviewed Contract Sent gate, approver ownership, and audit evidence expectations.","follow_up":"Send legal-review workflow preview to Morgan and procurement."},
-    {"company_slug":"shopify","company_name":"Shopify","industry":"Commerce platform","website":"https://www.shopify.com","contact_name":"Priya Raman","contact_title":"Director of Revenue Operations","team_name":"Revenue Operations","contact_email":"priya.raman.shopify@forkable.site","contact_phone":"+1 416 555 0184","source_name":"Product Signup","stage_name":"Security Review","status":"qualified","score":87,"deal_value":94000,"notes":"RevOps is validating field governance, stage auditability, and admin ownership before expanding the rollout beyond Enterprise Sales.","tags":"revops,governance","created_days_ago":13,"updated_days_ago":2,"activity_subject":"RevOps data model review","activity_detail":"Mapped required fields, owner roles, and report dependencies for the pilot.","follow_up":"Confirm field governance sign-off with RevOps."},
-    {"company_slug":"shopify","company_name":"Shopify","industry":"Commerce platform","website":"https://www.shopify.com","contact_name":"Caleb Torres","contact_title":"Procurement Lead","team_name":"Procurement","contact_email":"caleb.torres.shopify@forkable.site","contact_phone":"+1 416 555 0141","source_name":"Referral","stage_name":"Contract Sent","status":"qualified","score":91,"deal_value":142000,"notes":"Order form is in procurement. Legal approval evidence has been requested for the final internal review packet.","tags":"procurement,contract","created_days_ago":31,"updated_days_ago":4,"activity_subject":"Procurement packet review","activity_detail":"Confirmed order form, vendor packet, and legal evidence requirements.","follow_up":"Attach approved legal-review audit event to the order packet."},
-    {"company_slug":"stripe","company_name":"Stripe","industry":"Financial infrastructure","website":"https://stripe.com","contact_name":"Elena Voss","contact_title":"Head of Revenue Systems","team_name":"Revenue Operations","contact_email":"elena.voss.stripe@forkable.site","contact_phone":"+1 650 555 0191","source_name":"Website","stage_name":"Qualified","status":"qualified","score":83,"deal_value":128000,"notes":"Revenue Systems wants regional forecast views for quarterly pipeline calls. Approval gating should remain disabled for Stripe.","tags":"revops,regional-views","created_days_ago":21,"updated_days_ago":1,"activity_subject":"Regional forecast discovery","activity_detail":"Documented region taxonomy, forecast owner, and reporting cadence.","follow_up":"Share regional view prototype with Revenue Systems."},
-    {"company_slug":"stripe","company_name":"Stripe","industry":"Financial infrastructure","website":"https://stripe.com","contact_name":"Jon Bell","contact_title":"Sales Strategy Manager","team_name":"Sales Strategy","contact_email":"jon.bell.stripe@forkable.site","contact_phone":"+1 650 555 0168","source_name":"Partner","stage_name":"Contacted","status":"contacted","score":62,"deal_value":48000,"notes":"Sales Strategy is comparing manual spreadsheet forecasts against CRM-generated regional summaries.","tags":"sales-strategy,forecast","created_days_ago":8,"updated_days_ago":2,"activity_subject":"Forecast workflow call","activity_detail":"Reviewed current spreadsheet handoff and required rollup levels.","follow_up":"Send sample regional forecast export."},
-    {"company_slug":"stripe","company_name":"Stripe","industry":"Financial infrastructure","website":"https://stripe.com","contact_name":"Nadia Torres","contact_title":"Finance Business Partner","team_name":"Finance","contact_email":"nadia.torres.stripe@forkable.site","contact_phone":"+1 650 555 0130","source_name":"Email Campaign","stage_name":"Closed Won","status":"qualified","score":89,"deal_value":76000,"notes":"Finance signed off on the initial forecasting workspace. Expansion depends on regional filters landing cleanly.","tags":"finance,closed-won","created_days_ago":74,"updated_days_ago":10,"activity_subject":"Finance closeout","activity_detail":"Confirmed forecasting workspace acceptance and expansion criteria.","follow_up":"Schedule regional forecast expansion planning."},
-    {"company_slug":"datadog","company_name":"Datadog","industry":"Cloud observability","website":"https://www.datadoghq.com","contact_name":"Ari Klein","contact_title":"Director of Enterprise Applications","team_name":"Enterprise Applications","contact_email":"ari.klein.datadog@forkable.site","contact_phone":"+1 212 555 0188","source_name":"Trade Show","stage_name":"Proposal","status":"qualified","score":88,"deal_value":154000,"notes":"Enterprise Apps wants risk scoring based on integration count, security review age, and sponsor coverage before committing to a global rollout.","tags":"enterprise-apps,risk-score","created_days_ago":18,"updated_days_ago":3,"activity_subject":"Risk scoring design session","activity_detail":"Mapped risk factors to integration and security-review milestones.","follow_up":"Send risk-score weighting proposal."},
-    {"company_slug":"datadog","company_name":"Datadog","industry":"Cloud observability","website":"https://www.datadoghq.com","contact_name":"Samira Khan","contact_title":"Customer Operations Lead","team_name":"Customer Operations","contact_email":"samira.khan.datadog@forkable.site","contact_phone":"+1 212 555 0152","source_name":"Product Signup","stage_name":"Discovery","status":"contacted","score":66,"deal_value":52000,"notes":"Customer Ops is evaluating whether implementation risk can be surfaced in weekly account reviews.","tags":"customer-ops,discovery","created_days_ago":6,"updated_days_ago":1,"activity_subject":"Account review workflow","activity_detail":"Discussed how CSMs review readiness, blockers, and sponsor gaps.","follow_up":"Confirm weekly review dashboard requirements."},
-    {"company_slug":"datadog","company_name":"Datadog","industry":"Cloud observability","website":"https://www.datadoghq.com","contact_name":"Noah Patel","contact_title":"Procurement Manager","team_name":"Procurement","contact_email":"noah.patel.datadog@forkable.site","contact_phone":"+1 212 555 0177","source_name":"Referral","stage_name":"Lost","status":"unqualified","score":28,"deal_value":22000,"notes":"Procurement paused this smaller request until the enterprise applications team finishes vendor consolidation.","tags":"procurement,paused","created_days_ago":49,"updated_days_ago":17,"activity_subject":"Procurement pause","activity_detail":"Confirmed no action until the vendor consolidation review completes.","follow_up":"Revisit after vendor consolidation checkpoint."},
-    {"company_slug":"figma","company_name":"Figma","industry":"Design collaboration","website":"https://www.figma.com","contact_name":"Maya Chen","contact_title":"Design Operations Manager","team_name":"Design Operations","contact_email":"maya.chen.figma@forkable.site","contact_phone":"+1 415 555 0134","source_name":"Website","stage_name":"Qualified","status":"qualified","score":79,"deal_value":68000,"notes":"Design Ops wants mutual action plan templates for enterprise design-platform rollouts. Approval gating should remain hidden for this control account.","tags":"design-ops,action-plan","created_days_ago":15,"updated_days_ago":2,"activity_subject":"Mutual action plan discovery","activity_detail":"Reviewed launch milestones, stakeholder ownership, and template requirements.","follow_up":"Draft mutual action plan template for design rollouts."},
-    {"company_slug":"figma","company_name":"Figma","industry":"Design collaboration","website":"https://www.figma.com","contact_name":"Luca Moretti","contact_title":"Enterprise Success Director","team_name":"Customer Success","contact_email":"luca.moretti.figma@forkable.site","contact_phone":"+1 415 555 0189","source_name":"Partner","stage_name":"Proposal","status":"qualified","score":84,"deal_value":112000,"notes":"Enterprise Success is aligning template rollout with strategic account planning and renewal-risk reviews.","tags":"customer-success,templates","created_days_ago":26,"updated_days_ago":4,"activity_subject":"Template rollout proposal","activity_detail":"Reviewed adoption milestones and customer-facing plan formats.","follow_up":"Send template pilot scope to Enterprise Success."},
-    {"company_slug":"figma","company_name":"Figma","industry":"Design collaboration","website":"https://www.figma.com","contact_name":"Olivia Marsh","contact_title":"Business Operations Analyst","team_name":"Business Operations","contact_email":"olivia.marsh.figma@forkable.site","contact_phone":"+1 415 555 0165","source_name":"Email Campaign","stage_name":"Closed Won","status":"qualified","score":86,"deal_value":54000,"notes":"Initial reporting workspace closed. Business Operations is measuring template adoption before expansion.","tags":"bizops,closed-won","created_days_ago":83,"updated_days_ago":9,"activity_subject":"Reporting workspace closeout","activity_detail":"Confirmed acceptance metrics and expansion dependencies.","follow_up":"Review template adoption metrics with Business Operations."},
-    {"company_slug":"snowflake","company_name":"Snowflake","industry":"Data cloud","website":"https://www.snowflake.com","contact_name":"Leah Watanabe","contact_title":"VP Sales Operations","team_name":"Sales Operations","contact_email":"leah.watanabe.snowflake@forkable.site","contact_phone":"+1 406 555 0144","source_name":"Executive Intro","stage_name":"Security Review","status":"qualified","score":92,"deal_value":215000,"notes":"Sales Operations wants enterprise approval gates and approval evidence exports for data-cloud expansion deals.","tags":"sales-ops,approval-evidence","created_days_ago":24,"updated_days_ago":1,"activity_subject":"Approval evidence review","activity_detail":"Confirmed approval gate scope and export expectations for large deals.","follow_up":"Request legal-review approval for the expansion opportunity."},
-    {"company_slug":"snowflake","company_name":"Snowflake","industry":"Data cloud","website":"https://www.snowflake.com","contact_name":"Owen Brooks","contact_title":"Legal Operations Lead","team_name":"Legal Operations","contact_email":"owen.brooks.snowflake@forkable.site","contact_phone":"+1 406 555 0194","source_name":"Referral","stage_name":"Contract Sent","status":"qualified","score":89,"deal_value":164000,"notes":"Legal Operations needs consistent approval records attached to every large contract packet before final review.","tags":"legal-ops,contract","created_days_ago":39,"updated_days_ago":5,"activity_subject":"Contract evidence check","activity_detail":"Reviewed legal-review audit events and evidence export requirements.","follow_up":"Attach approved legal evidence to the contract packet."},
-    {"company_slug":"snowflake","company_name":"Snowflake","industry":"Data cloud","website":"https://www.snowflake.com","contact_name":"Tessa Nguyen","contact_title":"Field Enablement Manager","team_name":"Field Enablement","contact_email":"tessa.nguyen.snowflake@forkable.site","contact_phone":"+1 406 555 0171","source_name":"Webinar","stage_name":"New Lead","status":"new","score":53,"deal_value":38000,"notes":"Field Enablement is interested in approval training materials, but this smaller opportunity is below the approval threshold.","tags":"enablement,new","created_days_ago":4,"updated_days_ago":1,"activity_subject":"Enablement intake","activity_detail":"Captured training needs and pilot timing constraints.","follow_up":"Send approval workflow training outline."},
-    {"company_slug":"cloudflare","company_name":"Cloudflare","industry":"Security and network services","website":"https://www.cloudflare.com","contact_name":"Rina Kapoor","contact_title":"Security Governance Director","team_name":"Security","contact_email":"rina.kapoor.cloudflare@forkable.site","contact_phone":"+1 415 555 0198","source_name":"Trade Show","stage_name":"Discovery","status":"contacted","score":73,"deal_value":88000,"notes":"Security wants owner assignment, due dates, and audit events for questionnaire workflows. No deal approval gate is enabled for this account.","tags":"security,questionnaire","created_days_ago":10,"updated_days_ago":1,"activity_subject":"Questionnaire workflow discovery","activity_detail":"Mapped questionnaire intake, reviewer handoffs, and evidence retention needs.","follow_up":"Send questionnaire workspace workflow map."},
-    {"company_slug":"cloudflare","company_name":"Cloudflare","industry":"Security and network services","website":"https://www.cloudflare.com","contact_name":"Miles Grant","contact_title":"Enterprise Account Director","team_name":"Enterprise Sales","contact_email":"miles.grant.cloudflare@forkable.site","contact_phone":"+1 415 555 0122","source_name":"Partner","stage_name":"Qualified","status":"qualified","score":78,"deal_value":105000,"notes":"Enterprise Sales is coordinating with Security but should not see the approval-gate UI in this demo.","tags":"enterprise-sales,control","created_days_ago":17,"updated_days_ago":2,"activity_subject":"Enterprise sales alignment","activity_detail":"Aligned buyer stakeholders and security questionnaire timing.","follow_up":"Confirm Security reviewer availability."},
-    {"company_slug":"cloudflare","company_name":"Cloudflare","industry":"Security and network services","website":"https://www.cloudflare.com","contact_name":"Hannah Price","contact_title":"Vendor Risk Manager","team_name":"Security","contact_email":"hannah.price.cloudflare@forkable.site","contact_phone":"+1 415 555 0159","source_name":"Email Campaign","stage_name":"Proposal","status":"qualified","score":81,"deal_value":97000,"notes":"Vendor Risk is reviewing whether questionnaire artifacts can be exported for internal governance reviews.","tags":"vendor-risk,proposal","created_days_ago":27,"updated_days_ago":6,"activity_subject":"Vendor risk proposal","activity_detail":"Reviewed questionnaire ownership and exportable evidence needs.","follow_up":"Send export sample for vendor-risk review."},
-    {"company_slug":"plaid","company_name":"Plaid","industry":"Financial APIs","website":"https://plaid.com","contact_name":"Daniel Reyes","contact_title":"Revenue Operations Director","team_name":"Revenue Operations","contact_email":"daniel.reyes.plaid@forkable.site","contact_phone":"+1 415 555 0181","source_name":"Website","stage_name":"Proposal","status":"qualified","score":85,"deal_value":117000,"notes":"Revenue Operations wants regional pipeline views that preserve the normal deal process for fintech API expansion deals.","tags":"revops,regional-views","created_days_ago":20,"updated_days_ago":2,"activity_subject":"Regional view proposal","activity_detail":"Reviewed regional ownership, forecast rollups, and implementation timeline.","follow_up":"Send regional view pricing and delivery plan."},
-    {"company_slug":"plaid","company_name":"Plaid","industry":"Financial APIs","website":"https://plaid.com","contact_name":"Sophie Martin","contact_title":"Partnerships Lead","team_name":"Partnerships","contact_email":"sophie.martin.plaid@forkable.site","contact_phone":"+1 415 555 0119","source_name":"Partner","stage_name":"Contacted","status":"contacted","score":59,"deal_value":34000,"notes":"Partnerships needs a lightweight account-planning view for bank partners in EMEA.","tags":"partnerships,emea","created_days_ago":7,"updated_days_ago":1,"activity_subject":"Partner planning call","activity_detail":"Discussed EMEA bank partner segmentation and follow-up cadence.","follow_up":"Send partner planning sample view."},
-    {"company_slug":"plaid","company_name":"Plaid","industry":"Financial APIs","website":"https://plaid.com","contact_name":"Gabe Miller","contact_title":"Finance Manager","team_name":"Finance","contact_email":"gabe.miller.plaid@forkable.site","contact_phone":"+1 415 555 0164","source_name":"Referral","stage_name":"Closed Won","status":"qualified","score":88,"deal_value":82000,"notes":"Finance approved the initial regional forecasting workspace and wants expansion metrics next month.","tags":"finance,closed-won","created_days_ago":69,"updated_days_ago":12,"activity_subject":"Forecast workspace acceptance","activity_detail":"Confirmed initial workspace success criteria and next expansion metrics.","follow_up":"Prepare regional forecast expansion metrics."},
-    {"company_slug":"instacart","company_name":"Instacart","industry":"Marketplace logistics","website":"https://www.instacart.com","contact_name":"Amara Singh","contact_title":"VP Marketplace Operations","team_name":"Marketplace Operations","contact_email":"amara.singh.instacart@forkable.site","contact_phone":"+1 415 555 0173","source_name":"Executive Intro","stage_name":"Qualified","status":"qualified","score":82,"deal_value":136000,"notes":"Marketplace Operations wants pipeline rollups by market and delivery segment for the enterprise team.","tags":"marketplace,regional-views","created_days_ago":16,"updated_days_ago":2,"activity_subject":"Market pipeline discovery","activity_detail":"Mapped region and marketplace segment requirements.","follow_up":"Send market-level pipeline view proposal."},
-    {"company_slug":"instacart","company_name":"Instacart","industry":"Marketplace logistics","website":"https://www.instacart.com","contact_name":"Theo Nguyen","contact_title":"Enterprise Sales Manager","team_name":"Enterprise Sales","contact_email":"theo.nguyen.instacart@forkable.site","contact_phone":"+1 415 555 0146","source_name":"Webinar","stage_name":"Discovery","status":"contacted","score":61,"deal_value":45000,"notes":"Enterprise Sales is exploring regional views for retail media opportunities next quarter.","tags":"enterprise-sales,discovery","created_days_ago":9,"updated_days_ago":1,"activity_subject":"Retail media pipeline call","activity_detail":"Discussed regional view needs for retail media account planning.","follow_up":"Share retail media forecast mockup."},
-    {"company_slug":"instacart","company_name":"Instacart","industry":"Marketplace logistics","website":"https://www.instacart.com","contact_name":"Claire Evans","contact_title":"Procurement Specialist","team_name":"Procurement","contact_email":"claire.evans.instacart@forkable.site","contact_phone":"+1 415 555 0187","source_name":"Email Campaign","stage_name":"Lost","status":"unqualified","score":32,"deal_value":26000,"notes":"Procurement parked the request until marketplace operations confirms next-quarter budget.","tags":"procurement,paused","created_days_ago":43,"updated_days_ago":15,"activity_subject":"Budget timing check","activity_detail":"Confirmed request is parked until budget review.","follow_up":"Check back after marketplace operations budget review."},
-    {"company_slug":"atlassian","company_name":"Atlassian","industry":"Team collaboration software","website":"https://www.atlassian.com","contact_name":"Daniel Kim","contact_title":"Enterprise Sales Director","team_name":"Enterprise Sales","contact_email":"daniel.kim.atlassian@forkable.site","contact_phone":"+61 2 5550 0142","source_name":"Trade Show","stage_name":"Contract Sent","status":"qualified","score":90,"deal_value":158000,"notes":"Enterprise Sales is testing approval gates on strategic collaboration-suite deals before broader rollout.","tags":"enterprise-sales,approval-gate","created_days_ago":36,"updated_days_ago":5,"activity_subject":"Approval gate contract review","activity_detail":"Reviewed contract-stage requirements and approver assignments.","follow_up":"Confirm approved legal-review event is attached to contract."},
-    {"company_slug":"atlassian","company_name":"Atlassian","industry":"Team collaboration software","website":"https://www.atlassian.com","contact_name":"Grace Park","contact_title":"Sales Enablement Lead","team_name":"Sales Enablement","contact_email":"grace.park.atlassian@forkable.site","contact_phone":"+61 2 5550 0179","source_name":"Webinar","stage_name":"Contacted","status":"contacted","score":57,"deal_value":30000,"notes":"Sales Enablement needs workflow training if the Enterprise Sales pilot is approved.","tags":"enablement,training","created_days_ago":5,"updated_days_ago":1,"activity_subject":"Enablement planning","activity_detail":"Captured training needs for approval-gate rollout.","follow_up":"Send approval workflow enablement deck."},
-    {"company_slug":"atlassian","company_name":"Atlassian","industry":"Team collaboration software","website":"https://www.atlassian.com","contact_name":"Mira Jensen","contact_title":"Legal Counsel","team_name":"Legal","contact_email":"mira.jensen.atlassian@forkable.site","contact_phone":"+61 2 5550 0138","source_name":"Referral","stage_name":"Security Review","status":"qualified","score":77,"deal_value":99000,"notes":"Legal is reviewing how approval evidence should be captured before Enterprise Sales expands the workflow.","tags":"legal,security-review","created_days_ago":14,"updated_days_ago":2,"activity_subject":"Legal evidence review","activity_detail":"Discussed approval audit events and retention requirements.","follow_up":"Send audit event schema to Legal."},
-    {"company_slug":"hubspot","company_name":"HubSpot","industry":"CRM platform","website":"https://www.hubspot.com","contact_name":"Rachel Stone","contact_title":"Sales Operations Manager","team_name":"Sales Operations","contact_email":"rachel.stone.hubspot@forkable.site","contact_phone":"+1 617 555 0113","source_name":"Website","stage_name":"Proposal","status":"qualified","score":80,"deal_value":102000,"notes":"Sales Operations is a standard-product control account. They should not see enterprise approval UI despite the high deal value.","tags":"sales-ops,control","created_days_ago":22,"updated_days_ago":3,"activity_subject":"Standard workflow proposal","activity_detail":"Reviewed standard pipeline workflow and dashboard needs.","follow_up":"Send final standard CRM proposal."},
-    {"company_slug":"hubspot","company_name":"HubSpot","industry":"CRM platform","website":"https://www.hubspot.com","contact_name":"Tyler Chen","contact_title":"Customer Education Lead","team_name":"Customer Education","contact_email":"tyler.chen.hubspot@forkable.site","contact_phone":"+1 617 555 0155","source_name":"Email Campaign","stage_name":"New Lead","status":"new","score":45,"deal_value":19000,"notes":"Customer Education is interested in lightweight onboarding templates for internal teams.","tags":"education,new","created_days_ago":3,"updated_days_ago":1,"activity_subject":"Education intake","activity_detail":"Captured onboarding template goals and timeline.","follow_up":"Send onboarding template examples."},
-    {"company_slug":"hubspot","company_name":"HubSpot","industry":"CRM platform","website":"https://www.hubspot.com","contact_name":"Ivy Cohen","contact_title":"Procurement Analyst","team_name":"Procurement","contact_email":"ivy.cohen.hubspot@forkable.site","contact_phone":"+1 617 555 0192","source_name":"Referral","stage_name":"Lost","status":"unqualified","score":27,"deal_value":24000,"notes":"Procurement marked the request low priority until the next sales-ops platform review.","tags":"procurement,paused","created_days_ago":57,"updated_days_ago":18,"activity_subject":"Procurement closeout","activity_detail":"Confirmed request is parked until platform review.","follow_up":"Revisit after sales-ops platform review."},
-    {"company_slug":"canva","company_name":"Canva","industry":"Visual communication platform","website":"https://www.canva.com","contact_name":"Isla Murphy","contact_title":"Customer Success Operations Lead","team_name":"Customer Success","contact_email":"isla.murphy.canva@forkable.site","contact_phone":"+61 2 5550 0183","source_name":"Product Signup","stage_name":"Qualified","status":"qualified","score":84,"deal_value":73000,"notes":"Customer Success wants implementation risk scoring to time expansion workshops and executive check-ins.","tags":"customer-success,risk-score","created_days_ago":11,"updated_days_ago":1,"activity_subject":"CS risk scoring workshop","activity_detail":"Mapped launch readiness signals and executive sponsor checkpoints.","follow_up":"Send CS risk-score dashboard preview."},
-    {"company_slug":"canva","company_name":"Canva","industry":"Visual communication platform","website":"https://www.canva.com","contact_name":"Ben Hart","contact_title":"Enterprise Growth Manager","team_name":"Enterprise Sales","contact_email":"ben.hart.canva@forkable.site","contact_phone":"+61 2 5550 0127","source_name":"Partner","stage_name":"Proposal","status":"qualified","score":76,"deal_value":69000,"notes":"Enterprise Growth is coordinating expansion timing with Customer Success risk score output.","tags":"enterprise-growth,proposal","created_days_ago":23,"updated_days_ago":4,"activity_subject":"Expansion timing proposal","activity_detail":"Reviewed how risk score influences rollout timing and sponsor coverage.","follow_up":"Confirm expansion workshop date."},
-    {"company_slug":"canva","company_name":"Canva","industry":"Visual communication platform","website":"https://www.canva.com","contact_name":"Mika Tan","contact_title":"Business Operations Director","team_name":"Business Operations","contact_email":"mika.tan.canva@forkable.site","contact_phone":"+61 2 5550 0195","source_name":"Website","stage_name":"Closed Won","status":"qualified","score":90,"deal_value":88000,"notes":"Business Operations closed the first risk-score workspace and is tracking adoption with Customer Success.","tags":"bizops,closed-won","created_days_ago":77,"updated_days_ago":11,"activity_subject":"Risk workspace closeout","activity_detail":"Confirmed workspace acceptance and adoption tracking plan.","follow_up":"Review adoption data with Business Operations."},
-    {"company_slug":"ramp","company_name":"Ramp","industry":"Spend management","website":"https://ramp.com","contact_name":"Vivian Brooks","contact_title":"Security Program Manager","team_name":"Security","contact_email":"vivian.brooks.ramp@forkable.site","contact_phone":"+1 212 555 0136","source_name":"Executive Intro","stage_name":"Discovery","status":"contacted","score":74,"deal_value":92000,"notes":"Security is preparing a questionnaire workflow for finance stakeholders and external vendor reviews.","tags":"security,questionnaire","created_days_ago":12,"updated_days_ago":2,"activity_subject":"Security questionnaire intake","activity_detail":"Mapped reviewer roles, evidence requirements, and due dates.","follow_up":"Send questionnaire workflow plan to Security."},
-    {"company_slug":"ramp","company_name":"Ramp","industry":"Spend management","website":"https://ramp.com","contact_name":"Ethan Rossi","contact_title":"Finance Operations Lead","team_name":"Finance Operations","contact_email":"ethan.rossi.ramp@forkable.site","contact_phone":"+1 212 555 0162","source_name":"Referral","stage_name":"Proposal","status":"qualified","score":78,"deal_value":109000,"notes":"Finance Operations wants vendor review status surfaced in the pipeline, but no approval gate should appear for Ramp.","tags":"finance-ops,proposal","created_days_ago":25,"updated_days_ago":3,"activity_subject":"Finance operations proposal","activity_detail":"Reviewed vendor review status and reporting needs.","follow_up":"Send finance workflow proposal."},
-    {"company_slug":"ramp","company_name":"Ramp","industry":"Spend management","website":"https://ramp.com","contact_name":"Sasha Mehta","contact_title":"Procurement Manager","team_name":"Procurement","contact_email":"sasha.mehta.ramp@forkable.site","contact_phone":"+1 212 555 0185","source_name":"Email Campaign","stage_name":"Contacted","status":"contacted","score":55,"deal_value":42000,"notes":"Procurement is checking vendor-review reporting before joining the security workflow pilot.","tags":"procurement,contacted","created_days_ago":6,"updated_days_ago":1,"activity_subject":"Procurement qualification call","activity_detail":"Discussed vendor-review reporting and procurement handoff needs.","follow_up":"Send vendor review reporting example."}
+    {"company_slug":"shopify","company_name":"Shopify","industry":"Commerce platform","website":"https://www.shopify.com","contact_name":"Morgan Lee","contact_title":"VP Enterprise Sales","contact_email":"morgan.lee.shopify@forkable.site","contact_phone":"+1 416 555 0112","source_name":"Executive Intro","stage_name":"Proposal","status":"qualified","score":94,"deal_value":186000,"notes":"Enterprise Sales wants legal approval evidence before late-stage movement. Procurement is aligned if audit history is available in the CRM.","tags":"enterprise-sales,approval-gate","created_days_ago":19,"updated_days_ago":1,"activity_subject":"Approval workflow workshop","activity_detail":"Reviewed Contract Sent gate, approver ownership, and audit evidence expectations.","follow_up":"Send legal-review workflow preview to Morgan and procurement."},
+    {"company_slug":"shopify","company_name":"Shopify","industry":"Commerce platform","website":"https://www.shopify.com","contact_name":"Priya Raman","contact_title":"Director of Revenue Operations","contact_email":"priya.raman.shopify@forkable.site","contact_phone":"+1 416 555 0184","source_name":"Product Signup","stage_name":"Security Review","status":"qualified","score":87,"deal_value":94000,"notes":"RevOps is validating field governance, stage auditability, and admin ownership before expanding the rollout beyond Enterprise Sales.","tags":"revops,governance","created_days_ago":13,"updated_days_ago":2,"activity_subject":"RevOps data model review","activity_detail":"Mapped required fields, owner roles, and report dependencies for the pilot.","follow_up":"Confirm field governance sign-off with RevOps."},
+    {"company_slug":"shopify","company_name":"Shopify","industry":"Commerce platform","website":"https://www.shopify.com","contact_name":"Caleb Torres","contact_title":"Procurement Lead","contact_email":"caleb.torres.shopify@forkable.site","contact_phone":"+1 416 555 0141","source_name":"Referral","stage_name":"Contract Sent","status":"qualified","score":91,"deal_value":142000,"notes":"Order form is in procurement. Legal approval evidence has been requested for the final internal review packet.","tags":"procurement,contract","created_days_ago":31,"updated_days_ago":4,"activity_subject":"Procurement packet review","activity_detail":"Confirmed order form, vendor packet, and legal evidence requirements.","follow_up":"Attach approved legal-review audit event to the order packet."},
+    {"company_slug":"stripe","company_name":"Stripe","industry":"Financial infrastructure","website":"https://stripe.com","contact_name":"Elena Voss","contact_title":"Head of Revenue Systems","contact_email":"elena.voss.stripe@forkable.site","contact_phone":"+1 650 555 0191","source_name":"Website","stage_name":"Qualified","status":"qualified","score":83,"deal_value":128000,"notes":"Revenue Systems wants regional forecast views for quarterly pipeline calls. Approval gating should remain disabled for Stripe.","tags":"revops,regional-views","created_days_ago":21,"updated_days_ago":1,"activity_subject":"Regional forecast discovery","activity_detail":"Documented region taxonomy, forecast owner, and reporting cadence.","follow_up":"Share regional view prototype with Revenue Systems."},
+    {"company_slug":"stripe","company_name":"Stripe","industry":"Financial infrastructure","website":"https://stripe.com","contact_name":"Jon Bell","contact_title":"Sales Strategy Manager","contact_email":"jon.bell.stripe@forkable.site","contact_phone":"+1 650 555 0168","source_name":"Partner","stage_name":"Contacted","status":"contacted","score":62,"deal_value":48000,"notes":"Sales Strategy is comparing manual spreadsheet forecasts against CRM-generated regional summaries.","tags":"sales-strategy,forecast","created_days_ago":8,"updated_days_ago":2,"activity_subject":"Forecast workflow call","activity_detail":"Reviewed current spreadsheet handoff and required rollup levels.","follow_up":"Send sample regional forecast export."},
+    {"company_slug":"stripe","company_name":"Stripe","industry":"Financial infrastructure","website":"https://stripe.com","contact_name":"Nadia Torres","contact_title":"Finance Business Partner","contact_email":"nadia.torres.stripe@forkable.site","contact_phone":"+1 650 555 0130","source_name":"Email Campaign","stage_name":"Closed Won","status":"qualified","score":89,"deal_value":76000,"notes":"Finance signed off on the initial forecasting workspace. Expansion depends on regional filters landing cleanly.","tags":"finance,closed-won","created_days_ago":74,"updated_days_ago":10,"activity_subject":"Finance closeout","activity_detail":"Confirmed forecasting workspace acceptance and expansion criteria.","follow_up":"Schedule regional forecast expansion planning."},
+    {"company_slug":"datadog","company_name":"Datadog","industry":"Cloud observability","website":"https://www.datadoghq.com","contact_name":"Ari Klein","contact_title":"Director of Enterprise Applications","contact_email":"ari.klein.datadog@forkable.site","contact_phone":"+1 212 555 0188","source_name":"Trade Show","stage_name":"Proposal","status":"qualified","score":88,"deal_value":154000,"notes":"Enterprise Apps wants risk scoring based on integration count, security review age, and sponsor coverage before committing to a global rollout.","tags":"enterprise-apps,risk-score","created_days_ago":18,"updated_days_ago":3,"activity_subject":"Risk scoring design session","activity_detail":"Mapped risk factors to integration and security-review milestones.","follow_up":"Send risk-score weighting proposal."},
+    {"company_slug":"datadog","company_name":"Datadog","industry":"Cloud observability","website":"https://www.datadoghq.com","contact_name":"Samira Khan","contact_title":"Customer Operations Lead","contact_email":"samira.khan.datadog@forkable.site","contact_phone":"+1 212 555 0152","source_name":"Product Signup","stage_name":"Discovery","status":"contacted","score":66,"deal_value":52000,"notes":"Customer Ops is evaluating whether implementation risk can be surfaced in weekly account reviews.","tags":"customer-ops,discovery","created_days_ago":6,"updated_days_ago":1,"activity_subject":"Account review workflow","activity_detail":"Discussed how CSMs review readiness, blockers, and sponsor gaps.","follow_up":"Confirm weekly review dashboard requirements."},
+    {"company_slug":"datadog","company_name":"Datadog","industry":"Cloud observability","website":"https://www.datadoghq.com","contact_name":"Noah Patel","contact_title":"Procurement Manager","contact_email":"noah.patel.datadog@forkable.site","contact_phone":"+1 212 555 0177","source_name":"Referral","stage_name":"Lost","status":"unqualified","score":28,"deal_value":22000,"notes":"Procurement paused this smaller request until the enterprise applications team finishes vendor consolidation.","tags":"procurement,paused","created_days_ago":49,"updated_days_ago":17,"activity_subject":"Procurement pause","activity_detail":"Confirmed no action until the vendor consolidation review completes.","follow_up":"Revisit after vendor consolidation checkpoint."},
+    {"company_slug":"figma","company_name":"Figma","industry":"Design collaboration","website":"https://www.figma.com","contact_name":"Maya Chen","contact_title":"Design Operations Manager","contact_email":"maya.chen.figma@forkable.site","contact_phone":"+1 415 555 0134","source_name":"Website","stage_name":"Qualified","status":"qualified","score":79,"deal_value":68000,"notes":"Design Ops wants mutual action plan templates for enterprise design-platform rollouts. Approval gating should remain hidden for this control account.","tags":"design-ops,action-plan","created_days_ago":15,"updated_days_ago":2,"activity_subject":"Mutual action plan discovery","activity_detail":"Reviewed launch milestones, stakeholder ownership, and template requirements.","follow_up":"Draft mutual action plan template for design rollouts."},
+    {"company_slug":"figma","company_name":"Figma","industry":"Design collaboration","website":"https://www.figma.com","contact_name":"Luca Moretti","contact_title":"Enterprise Success Director","contact_email":"luca.moretti.figma@forkable.site","contact_phone":"+1 415 555 0189","source_name":"Partner","stage_name":"Proposal","status":"qualified","score":84,"deal_value":112000,"notes":"Enterprise Success is aligning template rollout with strategic account planning and renewal-risk reviews.","tags":"customer-success,templates","created_days_ago":26,"updated_days_ago":4,"activity_subject":"Template rollout proposal","activity_detail":"Reviewed adoption milestones and customer-facing plan formats.","follow_up":"Send template pilot scope to Enterprise Success."},
+    {"company_slug":"figma","company_name":"Figma","industry":"Design collaboration","website":"https://www.figma.com","contact_name":"Olivia Marsh","contact_title":"Business Operations Analyst","contact_email":"olivia.marsh.figma@forkable.site","contact_phone":"+1 415 555 0165","source_name":"Email Campaign","stage_name":"Closed Won","status":"qualified","score":86,"deal_value":54000,"notes":"Initial reporting workspace closed. Business Operations is measuring template adoption before expansion.","tags":"bizops,closed-won","created_days_ago":83,"updated_days_ago":9,"activity_subject":"Reporting workspace closeout","activity_detail":"Confirmed acceptance metrics and expansion dependencies.","follow_up":"Review template adoption metrics with Business Operations."},
+    {"company_slug":"snowflake","company_name":"Snowflake","industry":"Data cloud","website":"https://www.snowflake.com","contact_name":"Leah Watanabe","contact_title":"VP Sales Operations","contact_email":"leah.watanabe.snowflake@forkable.site","contact_phone":"+1 406 555 0144","source_name":"Executive Intro","stage_name":"Security Review","status":"qualified","score":92,"deal_value":215000,"notes":"Sales Operations wants enterprise approval gates and approval evidence exports for data-cloud expansion deals.","tags":"sales-ops,approval-evidence","created_days_ago":24,"updated_days_ago":1,"activity_subject":"Approval evidence review","activity_detail":"Confirmed approval gate scope and export expectations for large deals.","follow_up":"Request legal-review approval for the expansion opportunity."},
+    {"company_slug":"snowflake","company_name":"Snowflake","industry":"Data cloud","website":"https://www.snowflake.com","contact_name":"Owen Brooks","contact_title":"Legal Operations Lead","contact_email":"owen.brooks.snowflake@forkable.site","contact_phone":"+1 406 555 0194","source_name":"Referral","stage_name":"Contract Sent","status":"qualified","score":89,"deal_value":164000,"notes":"Legal Operations needs consistent approval records attached to every large contract packet before final review.","tags":"legal-ops,contract","created_days_ago":39,"updated_days_ago":5,"activity_subject":"Contract evidence check","activity_detail":"Reviewed legal-review audit events and evidence export requirements.","follow_up":"Attach approved legal evidence to the contract packet."},
+    {"company_slug":"snowflake","company_name":"Snowflake","industry":"Data cloud","website":"https://www.snowflake.com","contact_name":"Tessa Nguyen","contact_title":"Field Enablement Manager","contact_email":"tessa.nguyen.snowflake@forkable.site","contact_phone":"+1 406 555 0171","source_name":"Webinar","stage_name":"New Lead","status":"new","score":53,"deal_value":38000,"notes":"Field Enablement is interested in approval training materials, but this smaller opportunity is below the approval threshold.","tags":"enablement,new","created_days_ago":4,"updated_days_ago":1,"activity_subject":"Enablement intake","activity_detail":"Captured training needs and pilot timing constraints.","follow_up":"Send approval workflow training outline."},
+    {"company_slug":"cloudflare","company_name":"Cloudflare","industry":"Security and network services","website":"https://www.cloudflare.com","contact_name":"Rina Kapoor","contact_title":"Security Governance Director","contact_email":"rina.kapoor.cloudflare@forkable.site","contact_phone":"+1 415 555 0198","source_name":"Trade Show","stage_name":"Discovery","status":"contacted","score":73,"deal_value":88000,"notes":"Security wants owner assignment, due dates, and audit events for questionnaire workflows. No deal approval gate is enabled for this account.","tags":"security,questionnaire","created_days_ago":10,"updated_days_ago":1,"activity_subject":"Questionnaire workflow discovery","activity_detail":"Mapped questionnaire intake, reviewer handoffs, and evidence retention needs.","follow_up":"Send questionnaire workspace workflow map."},
+    {"company_slug":"cloudflare","company_name":"Cloudflare","industry":"Security and network services","website":"https://www.cloudflare.com","contact_name":"Miles Grant","contact_title":"Enterprise Account Director","contact_email":"miles.grant.cloudflare@forkable.site","contact_phone":"+1 415 555 0122","source_name":"Partner","stage_name":"Qualified","status":"qualified","score":78,"deal_value":105000,"notes":"Enterprise Sales is coordinating with Security but should not see the approval-gate UI in this demo.","tags":"enterprise-sales,control","created_days_ago":17,"updated_days_ago":2,"activity_subject":"Enterprise sales alignment","activity_detail":"Aligned buyer stakeholders and security questionnaire timing.","follow_up":"Confirm Security reviewer availability."},
+    {"company_slug":"cloudflare","company_name":"Cloudflare","industry":"Security and network services","website":"https://www.cloudflare.com","contact_name":"Hannah Price","contact_title":"Vendor Risk Manager","contact_email":"hannah.price.cloudflare@forkable.site","contact_phone":"+1 415 555 0159","source_name":"Email Campaign","stage_name":"Proposal","status":"qualified","score":81,"deal_value":97000,"notes":"Vendor Risk is reviewing whether questionnaire artifacts can be exported for internal governance reviews.","tags":"vendor-risk,proposal","created_days_ago":27,"updated_days_ago":6,"activity_subject":"Vendor risk proposal","activity_detail":"Reviewed questionnaire ownership and exportable evidence needs.","follow_up":"Send export sample for vendor-risk review."},
+    {"company_slug":"plaid","company_name":"Plaid","industry":"Financial APIs","website":"https://plaid.com","contact_name":"Daniel Reyes","contact_title":"Revenue Operations Director","contact_email":"daniel.reyes.plaid@forkable.site","contact_phone":"+1 415 555 0181","source_name":"Website","stage_name":"Proposal","status":"qualified","score":85,"deal_value":117000,"notes":"Revenue Operations wants regional pipeline views that preserve the normal deal process for fintech API expansion deals.","tags":"revops,regional-views","created_days_ago":20,"updated_days_ago":2,"activity_subject":"Regional view proposal","activity_detail":"Reviewed regional ownership, forecast rollups, and implementation timeline.","follow_up":"Send regional view pricing and delivery plan."},
+    {"company_slug":"plaid","company_name":"Plaid","industry":"Financial APIs","website":"https://plaid.com","contact_name":"Sophie Martin","contact_title":"Partnerships Lead","contact_email":"sophie.martin.plaid@forkable.site","contact_phone":"+1 415 555 0119","source_name":"Partner","stage_name":"Contacted","status":"contacted","score":59,"deal_value":34000,"notes":"Partnerships needs a lightweight account-planning view for bank partners in EMEA.","tags":"partnerships,emea","created_days_ago":7,"updated_days_ago":1,"activity_subject":"Partner planning call","activity_detail":"Discussed EMEA bank partner segmentation and follow-up cadence.","follow_up":"Send partner planning sample view."},
+    {"company_slug":"plaid","company_name":"Plaid","industry":"Financial APIs","website":"https://plaid.com","contact_name":"Gabe Miller","contact_title":"Finance Manager","contact_email":"gabe.miller.plaid@forkable.site","contact_phone":"+1 415 555 0164","source_name":"Referral","stage_name":"Closed Won","status":"qualified","score":88,"deal_value":82000,"notes":"Finance approved the initial regional forecasting workspace and wants expansion metrics next month.","tags":"finance,closed-won","created_days_ago":69,"updated_days_ago":12,"activity_subject":"Forecast workspace acceptance","activity_detail":"Confirmed initial workspace success criteria and next expansion metrics.","follow_up":"Prepare regional forecast expansion metrics."},
+    {"company_slug":"instacart","company_name":"Instacart","industry":"Marketplace logistics","website":"https://www.instacart.com","contact_name":"Amara Singh","contact_title":"VP Marketplace Operations","contact_email":"amara.singh.instacart@forkable.site","contact_phone":"+1 415 555 0173","source_name":"Executive Intro","stage_name":"Qualified","status":"qualified","score":82,"deal_value":136000,"notes":"Marketplace Operations wants pipeline rollups by market and delivery segment for the enterprise team.","tags":"marketplace,regional-views","created_days_ago":16,"updated_days_ago":2,"activity_subject":"Market pipeline discovery","activity_detail":"Mapped region and marketplace segment requirements.","follow_up":"Send market-level pipeline view proposal."},
+    {"company_slug":"instacart","company_name":"Instacart","industry":"Marketplace logistics","website":"https://www.instacart.com","contact_name":"Theo Nguyen","contact_title":"Enterprise Sales Manager","contact_email":"theo.nguyen.instacart@forkable.site","contact_phone":"+1 415 555 0146","source_name":"Webinar","stage_name":"Discovery","status":"contacted","score":61,"deal_value":45000,"notes":"Enterprise Sales is exploring regional views for retail media opportunities next quarter.","tags":"enterprise-sales,discovery","created_days_ago":9,"updated_days_ago":1,"activity_subject":"Retail media pipeline call","activity_detail":"Discussed regional view needs for retail media account planning.","follow_up":"Share retail media forecast mockup."},
+    {"company_slug":"instacart","company_name":"Instacart","industry":"Marketplace logistics","website":"https://www.instacart.com","contact_name":"Claire Evans","contact_title":"Procurement Specialist","contact_email":"claire.evans.instacart@forkable.site","contact_phone":"+1 415 555 0187","source_name":"Email Campaign","stage_name":"Lost","status":"unqualified","score":32,"deal_value":26000,"notes":"Procurement parked the request until marketplace operations confirms next-quarter budget.","tags":"procurement,paused","created_days_ago":43,"updated_days_ago":15,"activity_subject":"Budget timing check","activity_detail":"Confirmed request is parked until budget review.","follow_up":"Check back after marketplace operations budget review."},
+    {"company_slug":"atlassian","company_name":"Atlassian","industry":"Team collaboration software","website":"https://www.atlassian.com","contact_name":"Daniel Kim","contact_title":"Enterprise Sales Director","contact_email":"daniel.kim.atlassian@forkable.site","contact_phone":"+61 2 5550 0142","source_name":"Trade Show","stage_name":"Contract Sent","status":"qualified","score":90,"deal_value":158000,"notes":"Enterprise Sales is testing approval gates on strategic collaboration-suite deals before broader rollout.","tags":"enterprise-sales,approval-gate","created_days_ago":36,"updated_days_ago":5,"activity_subject":"Approval gate contract review","activity_detail":"Reviewed contract-stage requirements and approver assignments.","follow_up":"Confirm approved legal-review event is attached to contract."},
+    {"company_slug":"atlassian","company_name":"Atlassian","industry":"Team collaboration software","website":"https://www.atlassian.com","contact_name":"Grace Park","contact_title":"Sales Enablement Lead","contact_email":"grace.park.atlassian@forkable.site","contact_phone":"+61 2 5550 0179","source_name":"Webinar","stage_name":"Contacted","status":"contacted","score":57,"deal_value":30000,"notes":"Sales Enablement needs workflow training if the Enterprise Sales pilot is approved.","tags":"enablement,training","created_days_ago":5,"updated_days_ago":1,"activity_subject":"Enablement planning","activity_detail":"Captured training needs for approval-gate rollout.","follow_up":"Send approval workflow enablement deck."},
+    {"company_slug":"atlassian","company_name":"Atlassian","industry":"Team collaboration software","website":"https://www.atlassian.com","contact_name":"Mira Jensen","contact_title":"Legal Counsel","contact_email":"mira.jensen.atlassian@forkable.site","contact_phone":"+61 2 5550 0138","source_name":"Referral","stage_name":"Security Review","status":"qualified","score":77,"deal_value":99000,"notes":"Legal is reviewing how approval evidence should be captured before Enterprise Sales expands the workflow.","tags":"legal,security-review","created_days_ago":14,"updated_days_ago":2,"activity_subject":"Legal evidence review","activity_detail":"Discussed approval audit events and retention requirements.","follow_up":"Send audit event schema to Legal."},
+    {"company_slug":"hubspot","company_name":"HubSpot","industry":"CRM platform","website":"https://www.hubspot.com","contact_name":"Rachel Stone","contact_title":"Sales Operations Manager","contact_email":"rachel.stone.hubspot@forkable.site","contact_phone":"+1 617 555 0113","source_name":"Website","stage_name":"Proposal","status":"qualified","score":80,"deal_value":102000,"notes":"Sales Operations is a standard-product control account. They should not see enterprise approval UI despite the high deal value.","tags":"sales-ops,control","created_days_ago":22,"updated_days_ago":3,"activity_subject":"Standard workflow proposal","activity_detail":"Reviewed standard pipeline workflow and dashboard needs.","follow_up":"Send final standard CRM proposal."},
+    {"company_slug":"hubspot","company_name":"HubSpot","industry":"CRM platform","website":"https://www.hubspot.com","contact_name":"Tyler Chen","contact_title":"Customer Education Lead","contact_email":"tyler.chen.hubspot@forkable.site","contact_phone":"+1 617 555 0155","source_name":"Email Campaign","stage_name":"New Lead","status":"new","score":45,"deal_value":19000,"notes":"Customer Education is interested in lightweight onboarding templates for internal teams.","tags":"education,new","created_days_ago":3,"updated_days_ago":1,"activity_subject":"Education intake","activity_detail":"Captured onboarding template goals and timeline.","follow_up":"Send onboarding template examples."},
+    {"company_slug":"hubspot","company_name":"HubSpot","industry":"CRM platform","website":"https://www.hubspot.com","contact_name":"Ivy Cohen","contact_title":"Procurement Analyst","contact_email":"ivy.cohen.hubspot@forkable.site","contact_phone":"+1 617 555 0192","source_name":"Referral","stage_name":"Lost","status":"unqualified","score":27,"deal_value":24000,"notes":"Procurement marked the request low priority until the next sales-ops platform review.","tags":"procurement,paused","created_days_ago":57,"updated_days_ago":18,"activity_subject":"Procurement closeout","activity_detail":"Confirmed request is parked until platform review.","follow_up":"Revisit after sales-ops platform review."},
+    {"company_slug":"canva","company_name":"Canva","industry":"Visual communication platform","website":"https://www.canva.com","contact_name":"Isla Murphy","contact_title":"Customer Success Operations Lead","contact_email":"isla.murphy.canva@forkable.site","contact_phone":"+61 2 5550 0183","source_name":"Product Signup","stage_name":"Qualified","status":"qualified","score":84,"deal_value":73000,"notes":"Customer Success wants implementation risk scoring to time expansion workshops and executive check-ins.","tags":"customer-success,risk-score","created_days_ago":11,"updated_days_ago":1,"activity_subject":"CS risk scoring workshop","activity_detail":"Mapped launch readiness signals and executive sponsor checkpoints.","follow_up":"Send CS risk-score dashboard preview."},
+    {"company_slug":"canva","company_name":"Canva","industry":"Visual communication platform","website":"https://www.canva.com","contact_name":"Ben Hart","contact_title":"Enterprise Growth Manager","contact_email":"ben.hart.canva@forkable.site","contact_phone":"+61 2 5550 0127","source_name":"Partner","stage_name":"Proposal","status":"qualified","score":76,"deal_value":69000,"notes":"Enterprise Growth is coordinating expansion timing with Customer Success risk score output.","tags":"enterprise-growth,proposal","created_days_ago":23,"updated_days_ago":4,"activity_subject":"Expansion timing proposal","activity_detail":"Reviewed how risk score influences rollout timing and sponsor coverage.","follow_up":"Confirm expansion workshop date."},
+    {"company_slug":"canva","company_name":"Canva","industry":"Visual communication platform","website":"https://www.canva.com","contact_name":"Mika Tan","contact_title":"Business Operations Director","contact_email":"mika.tan.canva@forkable.site","contact_phone":"+61 2 5550 0195","source_name":"Website","stage_name":"Closed Won","status":"qualified","score":90,"deal_value":88000,"notes":"Business Operations closed the first risk-score workspace and is tracking adoption with Customer Success.","tags":"bizops,closed-won","created_days_ago":77,"updated_days_ago":11,"activity_subject":"Risk workspace closeout","activity_detail":"Confirmed workspace acceptance and adoption tracking plan.","follow_up":"Review adoption data with Business Operations."},
+    {"company_slug":"ramp","company_name":"Ramp","industry":"Spend management","website":"https://ramp.com","contact_name":"Vivian Brooks","contact_title":"Security Program Manager","contact_email":"vivian.brooks.ramp@forkable.site","contact_phone":"+1 212 555 0136","source_name":"Executive Intro","stage_name":"Discovery","status":"contacted","score":74,"deal_value":92000,"notes":"Security is preparing a questionnaire workflow for finance stakeholders and external vendor reviews.","tags":"security,questionnaire","created_days_ago":12,"updated_days_ago":2,"activity_subject":"Security questionnaire intake","activity_detail":"Mapped reviewer roles, evidence requirements, and due dates.","follow_up":"Send questionnaire workflow plan to Security."},
+    {"company_slug":"ramp","company_name":"Ramp","industry":"Spend management","website":"https://ramp.com","contact_name":"Ethan Rossi","contact_title":"Finance Operations Lead","contact_email":"ethan.rossi.ramp@forkable.site","contact_phone":"+1 212 555 0162","source_name":"Referral","stage_name":"Proposal","status":"qualified","score":78,"deal_value":109000,"notes":"Finance Operations wants vendor review status surfaced in the pipeline, but no approval gate should appear for Ramp.","tags":"finance-ops,proposal","created_days_ago":25,"updated_days_ago":3,"activity_subject":"Finance operations proposal","activity_detail":"Reviewed vendor review status and reporting needs.","follow_up":"Send finance workflow proposal."},
+    {"company_slug":"ramp","company_name":"Ramp","industry":"Spend management","website":"https://ramp.com","contact_name":"Sasha Mehta","contact_title":"Procurement Manager","contact_email":"sasha.mehta.ramp@forkable.site","contact_phone":"+1 212 555 0185","source_name":"Email Campaign","stage_name":"Contacted","status":"contacted","score":55,"deal_value":42000,"notes":"Procurement is checking vendor-review reporting before joining the security workflow pilot.","tags":"procurement,contacted","created_days_ago":6,"updated_days_ago":1,"activity_subject":"Procurement qualification call","activity_detail":"Discussed vendor-review reporting and procurement handoff needs.","follow_up":"Send vendor review reporting example."}
   ]
   $json$::jsonb;
 BEGIN
@@ -1160,7 +1140,6 @@ BEGIN
       accounts.slug || '@forkable.site' AS email,
       accounts.name || ' Demo User' AS full_name,
       'Demo workspace user' AS title,
-      'All teams' AS team_name,
       'Admin' AS account_role,
       true AS is_demo_login
     FROM public.company_accounts accounts
@@ -1175,14 +1154,12 @@ BEGIN
       leads.contact_email AS email,
       leads.contact_name AS full_name,
       leads.contact_title AS title,
-      leads.team_name,
       'Buyer' AS account_role,
       false AS is_demo_login
     FROM jsonb_to_recordset(v_leads) AS leads(
       company_slug text,
       contact_name text,
       contact_title text,
-      team_name text,
       contact_email text
     )
     JOIN public.company_accounts accounts
@@ -1198,7 +1175,6 @@ BEGIN
     email,
     full_name,
     title,
-    team_name,
     account_role,
     is_demo_login,
     user_id
@@ -1208,7 +1184,6 @@ BEGIN
     email,
     full_name,
     title,
-    team_name,
     account_role,
     is_demo_login,
     p_user_id
@@ -1218,7 +1193,6 @@ BEGIN
     company_account_id = EXCLUDED.company_account_id,
     full_name = EXCLUDED.full_name,
     title = EXCLUDED.title,
-    team_name = EXCLUDED.team_name,
     account_role = EXCLUDED.account_role,
     is_demo_login = EXCLUDED.is_demo_login,
     updated_at = now();
@@ -1290,7 +1264,6 @@ BEGIN
       website text,
       contact_name text,
       contact_title text,
-      team_name text,
       contact_email text,
       contact_phone text,
       source_name text,
@@ -1347,7 +1320,6 @@ BEGIN
       website text,
       contact_name text,
       contact_title text,
-      team_name text,
       contact_email text,
       contact_phone text,
       source_name text,

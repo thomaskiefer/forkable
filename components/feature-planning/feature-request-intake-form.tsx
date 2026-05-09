@@ -61,35 +61,39 @@ export function FeatureRequestIntakeForm() {
   return (
     <form
       onSubmit={submitRequest}
-      className="w-full max-w-2xl rounded-[1.15rem] border bg-card p-5 shadow-[0_30px_90px_rgba(0,0,0,0.14)] dark:border-white/[0.12] dark:bg-[#070707]/88 dark:shadow-[0_30px_90px_rgba(0,0,0,0.42)]"
+      className="w-full max-w-2xl rounded-[1.15rem] border bg-card p-7 sm:p-8 dark:border-white/[0.12] dark:bg-[#070707]/88"
     >
-      <div className="space-y-1">
+      <div className="space-y-1.5">
         <p className="text-sm text-muted-foreground">New feature request</p>
-        <h1 className="text-xl font-semibold">Start with your team's workflow request</h1>
+        <h1 className="font-display text-2xl font-medium tracking-tight">
+          Start with your company's workflow request
+        </h1>
       </div>
 
-      <div className="mt-5 space-y-2">
-        <Label htmlFor="title">Request title</Label>
-        <Input
-          id="title"
-          name="title"
-          placeholder="Enterprise Deal Approval Gate"
-          required
-        />
+      <div className="mt-7 space-y-5">
+        <div className="space-y-2">
+          <Label htmlFor="title">Request title</Label>
+          <Input
+            id="title"
+            name="title"
+            placeholder="Enterprise Deal Approval Gate"
+            required
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="description">Workflow request</Label>
+          <Textarea
+            id="description"
+            name="description"
+            className="min-h-28 resize-none"
+            placeholder="Any deal over $50k must go through Legal Review before it can move to Contract Sent or Closed Won."
+            required
+          />
+        </div>
       </div>
 
-      <div className="mt-4 space-y-2">
-        <Label htmlFor="description">Workflow request</Label>
-        <Textarea
-          id="description"
-          name="description"
-          className="min-h-32 resize-none"
-          placeholder="Any deal over $50k must go through Legal Review before it can move to Contract Sent or Closed Won."
-          required
-        />
-      </div>
-
-      <div className="mt-5 flex justify-end">
+      <div className="mt-7 flex justify-end">
         <Button type="submit" disabled={isSubmitting}>
           {isSubmitting ? <Loader2 className="animate-spin" /> : null}
           Create request

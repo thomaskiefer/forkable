@@ -164,7 +164,7 @@ export function SignUpForm({
   return (
     <div className="space-y-5">
       <form className="space-y-4" onSubmit={handleSignUp}>
-        <div className="space-y-2">
+        <div className="space-y-3">
           <Label htmlFor="name">Name</Label>
           <Input
             id="name"
@@ -177,7 +177,7 @@ export function SignUpForm({
             onChange={(e) => setName(e.target.value)}
           />
         </div>
-        <div className="space-y-2">
+        <div className="space-y-3">
           <Label htmlFor="email">Email</Label>
           <Input
             id="email"
@@ -190,7 +190,7 @@ export function SignUpForm({
             onChange={(e) => setEmail(e.target.value)}
           />
         </div>
-        <div className="space-y-2">
+        <div className="space-y-3">
           <Label htmlFor="password">Password</Label>
           <Input
             id="password"

@@ -2,14 +2,14 @@
 
 ## Product Idea
 
-Forkable is an adaptable CRM. The CRM changes to fit the logged-in team's sales workflow, without creating permanent customer forks.
+Forkable is an adaptable CRM. The CRM changes to fit the logged-in company's sales workflow, without creating permanent customer forks.
 
 The core story is:
 
-1. A user signs in as a member of a company/team.
-2. That team describes a CRM workflow they need.
+1. A user signs in as a member of a company.
+2. That company describes a CRM workflow they need.
 3. Forkable turns the request into a chat-refined implementation plan.
-4. A coding agent uses Nia for codebase context and Hyperspell for customer/team context.
+4. A coding agent uses Nia for codebase context and Hyperspell for company context.
 5. The agent builds the change on a Git branch and, when schema/RLS isolation matters, an InsForge backend branch.
 6. The system deploys a preview, runs smoke tests, and shows a developer review package.
 7. After approval, the change merges into the shared CRM and is enabled only for the requesting company through feature flags.
@@ -25,10 +25,10 @@ Use this model:
 - `auth user` -> `company_account_members.email`
 - `company_account_members.company_account_id` -> `company_accounts.id`
 - `change_requests.company_account_id` records the company that requested the change.
-- `company_feature_flags.company_account_id` controls rollout for that company/team.
+- `company_feature_flags.company_account_id` controls rollout for that company.
 - CRM reads should use `company_account_id` and feature-flag helpers rather than comparing arbitrary customer names.
 
-The feature-request intake should ask what workflow the team wants, not which customer to customize. If a signed-in user is not mapped to a company account, block request creation with a clear setup error instead of asking them to choose a customer.
+The feature-request intake should ask what workflow the company wants, not which customer to customize. If a signed-in user is not mapped to a company account, block request creation with a clear setup error instead of asking them to choose a customer.
 
 ## Feature Request Workflow
 
@@ -40,7 +40,7 @@ The intended end-to-end workflow is:
 4. `Send to agent` queues an agent run.
 5. The InsForge Compute runner claims the queued run.
 6. The runner clones the target CRM repo, checks out `feat/<feature>`, loads the plan, and invokes Codex with the user's Codex auth.
-7. The agent uses Nia before editing code and uses Hyperspell when customer/team context is needed.
+7. The agent uses Nia before editing code and uses Hyperspell when company context is needed.
 8. The agent applies additive schema/UI/backend changes, preserving existing behavior for companies without the flag.
 9. Checks and smoke tests run.
 10. A preview and developer review package are produced.
@@ -52,9 +52,9 @@ Until the runner is configured with a target repo and enabled, the UI should mak
 
 The demo should say:
 
-> Forkable is a CRM that adapts to each team's workflow. A team asks for custom behavior, Forkable plans it in chat, builds it on a safe branch, reviews it, and ships it back into the shared CRM behind a company feature flag.
+> Forkable is a CRM that adapts to each company's workflow. A company asks for custom behavior, Forkable plans it in chat, builds it on a safe branch, reviews it, and ships it back into the shared CRM behind a company feature flag.
 
-Avoid copy that implies a human operator manually chooses a customer to receive a feature. The logged-in company/team is the rollout scope.
+Avoid copy that implies a human operator manually chooses a customer to receive a feature. The logged-in company is the rollout scope.
 
 ## Implementation Rules
 

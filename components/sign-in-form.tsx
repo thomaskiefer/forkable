@@ -34,7 +34,7 @@ export function SignInForm({ providers }: { providers: string[] }) {
   return (
     <div className="space-y-5">
       <form className="space-y-4" onSubmit={handleSubmit}>
-        <div className="space-y-2">
+        <div className="space-y-3">
           <Label htmlFor="email">Email</Label>
           <Input
             id="email"
@@ -47,8 +47,8 @@ export function SignInForm({ providers }: { providers: string[] }) {
             onChange={(e) => setEmail(e.target.value)}
           />
         </div>
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
+        <div className="space-y-3">
+          <div className="flex items-baseline justify-between">
             <Label htmlFor="password">Password</Label>
             <a
               href="/auth/reset-password"

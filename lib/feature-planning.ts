@@ -12,7 +12,7 @@ import type {
 } from '@/lib/types';
 
 const PLANNER_SYSTEM_PROMPT = `You are Forkable's feature planning assistant.
-Your job is to help a logged-in company team refine one CRM workflow request into a safe coding-agent handoff.
+Your job is to help a logged-in company user refine one CRM workflow request into a safe coding-agent handoff.
 
 Operate like a pragmatic senior product engineer:
 - Ask only for missing decisions that materially affect implementation.
@@ -56,7 +56,7 @@ function fallbackAssistantReply(
     return [
       `I can turn "${request.title}" into a coding-agent handoff now.`,
       '',
-      `The implementation should stay additive: company/team feature flag, approval persistence, backend enforcement, feature-gated CRM UI, preview deployment, and smoke tests that prove ${request.customer_name} differs only where intended.`,
+      `The implementation should stay additive: company feature flag, approval persistence, backend enforcement, feature-gated CRM UI, preview deployment, and smoke tests that prove ${request.customer_name} differs only where intended.`,
       '',
       'Use "Draft plan" to freeze the reviewed plan, then "Send to coding agent" to queue the implementation run.',
     ].join('\n');
@@ -65,7 +65,7 @@ function fallbackAssistantReply(
   return [
     'I would refine this around four decisions before implementation:',
     '',
-    `1. Rollout: what team or role inside ${request.customer_name} receives the flag first?`,
+    `1. Rollout: what company-level behavior should ${request.customer_name} receive first?`,
     '2. Enforcement: which backend path blocks invalid stage movement?',
     '3. Data model: what approval state and audit events must persist?',
     '4. Proof: which smoke tests prove the customization is isolated?',

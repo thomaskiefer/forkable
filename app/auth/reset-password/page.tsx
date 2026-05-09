@@ -9,14 +9,8 @@ export default function ResetPasswordPage() {
       <div className="mx-auto grid min-h-dvh max-w-7xl gap-6 p-4 sm:p-6 lg:grid-cols-[1.05fr_0.95fr]">
         <section className="hidden min-h-[640px] lg:flex">
           <AuthShowcase
-            quote={
-              <>
-                Welcome to your
-                <br />
-                <em className="not-italic">&ldquo;<span className="italic text-primary">personalized</span>&rdquo;</em> CRM.
-              </>
-            }
-            description="Reset access and return to your pipeline, reviews, and account-specific workflows."
+            quote="Back to your sales workspace."
+            description="Reset access to Forkable and return to your pipeline, reviews, and account-specific workflows."
           />
         </section>
 
