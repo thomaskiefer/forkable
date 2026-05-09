@@ -239,9 +239,6 @@ export default async function ClientsPage() {
                       </div>
                       <div className="min-w-0 space-y-0.5">
                         <p className="truncate font-medium">{name}</p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {client.client_code as string}
-                        </p>
                       </div>
                     </div>
                     <div className="text-sm">
