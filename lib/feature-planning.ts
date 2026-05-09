@@ -24,6 +24,14 @@ function serializeHistory(messages: ChangeRequestPlanningMessage[]) {
     .join('\n\n');
 }
 
+function extractAgentHandoffs(messages: ChangeRequestPlanningMessage[]) {
+  return messages
+    .map((message) => message.metadata?.agent_handoff)
+    .filter((handoff): handoff is string => typeof handoff === 'string' && handoff.trim().length > 0)
+    .slice(-3)
+    .join('\n\n');
+}
+
 function getRunnerUrl() {
   return normalizeRunnerUrl(process.env.FORKABLE_AGENT_RUNNER_URL);
 }
@@ -156,6 +164,78 @@ function formatRunStatusMessage(run: AgentRun | null, steps: AgentStep[] = []) {
   return lines.join('\n');
 }
 
+function shouldCondensePlanningReply(content: string) {
+  const normalized = content.toLowerCase();
+  return (
+    normalized.includes('scope:') &&
+    normalized.includes('build plan:') &&
+    (
+      normalized.includes('ready to draft') ||
+      normalized.includes('ready to build') ||
+      normalized.includes('coding agent')
+    )
+  );
+}
+
+function formatPlanningReplyForChat(content: string) {
+  if (!shouldCondensePlanningReply(content)) return content;
+
+  return [
+    'Ready to build.',
+    '',
+    'I have enough context to send this to the coding agent. I will keep the change scoped to your company and show live build progress here once it starts.',
+  ].join('\n');
+}
+
+type CodexPlanningReply = {
+  userMessage: string;
+  agentHandoff?: string;
+  rawContent: string;
+};
+
+function stripJsonFence(content: string) {
+  const trimmed = content.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fenced?.[1]?.trim() ?? trimmed;
+}
+
+function parseCodexPlanningReply(content: string): CodexPlanningReply {
+  const rawContent = content.trim();
+  const normalized = stripJsonFence(rawContent);
+
+  try {
+    const parsed = JSON.parse(normalized) as {
+      user_message?: unknown;
+      userMessage?: unknown;
+      message?: unknown;
+      agent_handoff?: unknown;
+      agentHandoff?: unknown;
+      handoff?: unknown;
+    };
+    const userMessage = parsed.user_message ?? parsed.userMessage ?? parsed.message;
+    const agentHandoff = parsed.agent_handoff ?? parsed.agentHandoff ?? parsed.handoff;
+
+    if (typeof userMessage === 'string' && userMessage.trim()) {
+      return {
+        userMessage: userMessage.trim(),
+        agentHandoff: typeof agentHandoff === 'string' && agentHandoff.trim()
+          ? agentHandoff.trim()
+          : undefined,
+        rawContent,
+      };
+    }
+  } catch {
+    // Older runners returned plain text. Keep accepting that until all runners are updated.
+  }
+
+  const userMessage = formatPlanningReplyForChat(rawContent);
+  return {
+    userMessage,
+    agentHandoff: userMessage === rawContent ? undefined : rawContent,
+    rawContent,
+  };
+}
+
 async function getCodexPlanningReply(input: {
   request: ChangeRequest;
   messages: ChangeRequestPlanningMessage[];
@@ -188,7 +268,8 @@ async function getCodexPlanningReply(input: {
   });
 
   if (input.onDelta && response.ok && response.body) {
-    return readCodexPlanningStream(response, input.onDelta, input.onStatus);
+    const content = await readCodexPlanningStream(response, input.onDelta, input.onStatus);
+    return parseCodexPlanningReply(content);
   }
 
   const body = (await response.json().catch(() => ({}))) as {
@@ -204,7 +285,7 @@ async function getCodexPlanningReply(input: {
     throw new Error('Codex planner returned an empty response.');
   }
 
-  return body.content;
+  return parseCodexPlanningReply(body.content);
 }
 
 async function readCodexPlanningStream(
@@ -285,7 +366,7 @@ export async function streamPlanningMessage(input: {
       };
 
       return (async () => {
-        let assistantText = '';
+        let planningReply: CodexPlanningReply | null = null;
 
         if (!shouldUseCodexPlanner()) {
           throw new Error(
@@ -293,7 +374,7 @@ export async function streamPlanningMessage(input: {
           );
         }
 
-        assistantText = await getCodexPlanningReply({
+        planningReply = await getCodexPlanningReply({
           request: input.request,
           messages: existingMessages,
           text: input.text,
@@ -302,7 +383,7 @@ export async function streamPlanningMessage(input: {
           onStatus: (message) => writeEvent({ type: 'status', message }),
         });
 
-        if (!assistantText.trim()) {
+        if (!planningReply.userMessage.trim()) {
           throw new Error('Codex planner returned an empty planning response.');
         }
 
@@ -321,9 +402,15 @@ export async function streamPlanningMessage(input: {
               ]),
           {
             role: 'assistant' as const,
-            content: assistantText,
+            content: planningReply.userMessage,
             metadata: {
               provider: 'codex_runner',
+              ...(planningReply.agentHandoff
+                ? { agent_handoff: planningReply.agentHandoff }
+                : {}),
+              ...(planningReply.rawContent !== planningReply.userMessage
+                ? { raw_planning_reply: planningReply.rawContent }
+                : {}),
               ...(input.isInitialKickoff || input.persistUserMessage === false
                 ? { kickoff: true }
                 : {}),
@@ -527,6 +614,10 @@ export async function streamImplementationMessage(input: {
           input.userId,
           input.accessToken,
         );
+        writeEvent({
+          type: 'run',
+          payload: { run },
+        });
 
         if (run.status !== 'queued') {
           const steps = (await getAgentSteps(run.id, input.accessToken)) as AgentStep[];
@@ -684,6 +775,8 @@ function buildCodingAgentPrompt(
   request: ChangeRequest,
   messages: ChangeRequestPlanningMessage[],
 ) {
+  const agentHandoffs = extractAgentHandoffs(messages);
+
   return [
     'Use Nia to inspect this CRM repo before making changes.',
     '',
@@ -695,6 +788,9 @@ function buildCodingAgentPrompt(
     '',
     'Planning conversation:',
     serializeHistory(messages) || '(none)',
+    '',
+    'Planner handoff:',
+    agentHandoffs || '(none)',
     '',
     'Implementation requirements:',
     '- Do not modify production directly.',

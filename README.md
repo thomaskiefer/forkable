@@ -142,6 +142,18 @@ split it into chunks and set `CODEX_AUTH_JSON_B64_PART_001`,
 `CODEX_AUTH_JSON_B64_PART_002`, and so on. The runner reconstructs them in
 numeric order at startup.
 
+The runner also needs InsForge CLI auth for backend branches and managed
+deployments. Seed it from a trusted local CLI login:
+
+```bash
+base64 -i ~/.insforge/credentials.json | tr -d '\n'
+base64 -i ~/.insforge/config.json | tr -d '\n'
+```
+
+Set those values as `INSFORGE_CLI_CREDENTIALS_JSON_B64` and
+`INSFORGE_CLI_CONFIG_JSON_B64`, and set `INSFORGE_PROJECT_ID` to the target
+project id.
+
 To route the request-planning chat through the runner, set these on the Next app:
 
 ```bash

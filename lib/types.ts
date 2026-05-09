@@ -426,6 +426,12 @@ export type FeaturePlanningStreamEvent =
       };
     }
   | {
+      type: 'run';
+      payload: {
+        run: AgentRun;
+      };
+    }
+  | {
       type: 'done';
       payload: {
         userMessage: ChangeRequestPlanningMessage | null;

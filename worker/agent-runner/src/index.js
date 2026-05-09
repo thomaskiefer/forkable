@@ -23,6 +23,9 @@ const config = {
   webhookSecret: process.env.FORKABLE_RUNNER_WEBHOOK_SECRET || '',
   insforgeUrl: requireEnv('INSFORGE_URL'),
   insforgeApiKey: requireEnv('INSFORGE_API_KEY'),
+  insforgeAccessToken: process.env.INSFORGE_ACCESS_TOKEN || '',
+  insforgeProjectId: process.env.INSFORGE_PROJECT_ID || '',
+  insforgeCliHome: process.env.INSFORGE_CLI_HOME || path.join(process.env.HOME || '/root', '.insforge'),
   repoUrl: process.env.FORKABLE_TARGET_REPO_URL || '',
   repoRef: process.env.FORKABLE_TARGET_REPO_REF || 'main',
   repoSubdir: process.env.FORKABLE_TARGET_REPO_SUBDIR || '',
@@ -51,6 +54,7 @@ const insforge = createClient({
 const state = {
   activeRunId: null,
   codexAuthReady: false,
+  insforgeCliAuthReady: false,
   lastError: null,
   lastRunAt: null,
   startedAt: new Date().toISOString(),
@@ -59,6 +63,7 @@ const state = {
 startHealthServer();
 await mkdir(config.workdir, { recursive: true });
 await mkdir(config.codexHome, { recursive: true });
+await bootstrapInsforgeCliAuth();
 await bootstrapCodexAuth();
 
 if (config.enabled) {
@@ -115,6 +120,7 @@ function startHealthServer() {
         runnerId,
         activeRunId: state.activeRunId,
         codexAuthMode: getCodexAuthMode(),
+        insforgeCliAuthMode: getInsforgeCliAuthMode(),
         lastError: state.lastError,
         lastRunAt: state.lastRunAt,
         startedAt: state.startedAt,
@@ -1204,11 +1210,7 @@ async function maybeCreateBackendBranch(run, workspace) {
       {
         cwd: workspace,
         logPath: path.join(workspace, '..', 'insforge-branch.log'),
-        env: {
-          ...process.env,
-          INSFORGE_ACCESS_TOKEN: process.env.INSFORGE_ACCESS_TOKEN || '',
-          INSFORGE_PROJECT_ID: process.env.INSFORGE_PROJECT_ID || '',
-        },
+        env: insforgeCliEnv(),
       },
     );
     await setStep(run.id, 4, 'passed', `InsForge backend branch ready: ${run.backend_branch}.`);
@@ -1566,8 +1568,11 @@ function buildPlanningPrompt(body) {
     '- Keep the plan grounded in authenticated company scope, Git branches, InsForge backend branches, Nia repository context, Hyperspell company context, backend enforcement, preview deploys, smoke tests, and automatic merge/deploy.',
     '- Do not claim code has been changed.',
     '- For the initial turn, begin helping immediately from the submitted description. Ask one concise scoping question only when the request is genuinely ambiguous.',
-    '- Keep the reply concise and conversational.',
-    '- If the request is ready, say it is ready to draft and send to the coding agent.',
+    '- Keep the user-facing reply concise and conversational.',
+    '- If the request is ready, the user-facing reply should say it is ready to build without exposing the internal scope checklist or implementation plan.',
+    '- Put the detailed scope, assumptions, backend requirements, rollout model, Nia context expectations, verification plan, and coding-agent handoff in agent_handoff, not user_message.',
+    '- Return only valid JSON. Do not wrap it in Markdown. Do not include commentary outside JSON.',
+    '- JSON shape: {"user_message":"short message shown to the company user","agent_handoff":"private implementation handoff for the coding agent"}',
     '',
     'Private feature request context:',
     JSON.stringify({
@@ -1663,6 +1668,37 @@ async function bootstrapCodexAuth() {
   state.codexAuthReady = true;
 }
 
+async function bootstrapInsforgeCliAuth() {
+  await mkdir(config.insforgeCliHome, { recursive: true });
+
+  const credentialsPath = path.join(config.insforgeCliHome, 'credentials.json');
+  if (await exists(credentialsPath)) {
+    state.insforgeCliAuthReady = true;
+    return;
+  }
+
+  const credentials = getSeededJson('INSFORGE_CLI_CREDENTIALS_JSON', 'INSFORGE_CLI_CREDENTIALS_JSON_B64');
+  const cliConfig = getSeededJson('INSFORGE_CLI_CONFIG_JSON', 'INSFORGE_CLI_CONFIG_JSON_B64');
+
+  if (cliConfig) {
+    await writeFile(path.join(config.insforgeCliHome, 'config.json'), cliConfig);
+  }
+
+  if (!credentials) return;
+
+  await writeFile(credentialsPath, credentials);
+  await chmod(credentialsPath, 0o600);
+  state.insforgeCliAuthReady = true;
+}
+
+function getSeededJson(rawKey, encodedKey) {
+  if (process.env[encodedKey]) {
+    return Buffer.from(process.env[encodedKey], 'base64').toString('utf8');
+  }
+
+  return process.env[rawKey] || '';
+}
+
 async function persistCodexAuth(codexHome) {
   const authPath = path.join(codexHome, 'auth.json');
   if (!(await exists(authPath))) return;
@@ -1677,6 +1713,25 @@ function getCodexAuthMode() {
   if (hasChunkedCodexAuth()) return 'chatgpt_auth_seed_chunked';
   if (state.codexAuthReady) return 'chatgpt_auth_file';
   return 'none';
+}
+
+function getInsforgeCliAuthMode() {
+  if (config.insforgeAccessToken && config.insforgeProjectId) return 'access_token';
+  if (process.env.INSFORGE_CLI_CREDENTIALS_JSON_B64 || process.env.INSFORGE_CLI_CREDENTIALS_JSON) {
+    return 'credential_file_seed';
+  }
+  if (state.insforgeCliAuthReady) return 'credential_file';
+  if (process.env.INSFORGE_EMAIL && process.env.INSFORGE_PASSWORD && config.insforgeProjectId) {
+    return 'email_password';
+  }
+  return 'none';
+}
+
+function insforgeCliEnv() {
+  const env = { ...process.env };
+  if (config.insforgeAccessToken) env.INSFORGE_ACCESS_TOKEN = config.insforgeAccessToken;
+  if (config.insforgeProjectId) env.INSFORGE_PROJECT_ID = config.insforgeProjectId;
+  return env;
 }
 
 function assertCodexAuthAvailable() {
@@ -1882,6 +1937,7 @@ async function maybeDeployPreview(run, workspace) {
     {
       cwd: workspace,
       logPath: path.join(workspace, '..', 'preview-deploy.json'),
+      env: insforgeCliEnv(),
       timeoutMs: 20 * 60 * 1000,
     },
   );
@@ -1968,6 +2024,7 @@ async function maybeDeployProduction(workspace) {
     {
       cwd: workspace,
       logPath: path.join(workspace, '..', 'production-deploy.json'),
+      env: insforgeCliEnv(),
       timeoutMs: 20 * 60 * 1000,
     },
   );
@@ -2293,6 +2350,10 @@ function redact(value) {
     process.env.NIA_API_KEY,
     process.env.HYPERSPELL_API_KEY,
     process.env.INSFORGE_ACCESS_TOKEN,
+    process.env.INSFORGE_CLI_CREDENTIALS_JSON,
+    process.env.INSFORGE_CLI_CREDENTIALS_JSON_B64,
+    process.env.INSFORGE_CLI_CONFIG_JSON,
+    process.env.INSFORGE_CLI_CONFIG_JSON_B64,
   ]) {
     if (secret) output = output.split(secret).join('[redacted]');
   }

@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { Loader2, Terminal } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import type {
   AgentRun,
+  AgentStep,
   ChangeRequest,
   ChangeRequestPlan,
   ChangeRequestPlanningMessage,
@@ -61,6 +62,69 @@ function statusLabel(status: string) {
   return status.replaceAll('_', ' ');
 }
 
+function shouldCondensePlanningReply(content: string) {
+  const normalized = content.toLowerCase();
+  return (
+    normalized.includes('scope:') &&
+    normalized.includes('build plan:') &&
+    (
+      normalized.includes('ready to draft') ||
+      normalized.includes('ready to build') ||
+      normalized.includes('coding agent')
+    )
+  );
+}
+
+function messageContentForDisplay(message: PendingMessage) {
+  if (message.role !== 'assistant' || !shouldCondensePlanningReply(message.content)) {
+    return message.content;
+  }
+
+  return [
+    'Ready to build.',
+    '',
+    'I have enough context to send this to the coding agent. I will keep the change scoped to your company and show live build progress here once it starts.',
+  ].join('\n');
+}
+
+function getCurrentStep(steps: AgentStep[]) {
+  return (
+    steps.find((step) => step.status === 'running') ??
+    steps.find((step) => step.status === 'pending') ??
+    [...steps].reverse().find((step) => step.status === 'passed') ??
+    null
+  );
+}
+
+function shouldRefreshRun(run: AgentRun | null) {
+  return run ? ['queued', 'running'].includes(run.status) : false;
+}
+
+function phaseLabel(step: AgentStep | null, run: AgentRun) {
+  if (run.status === 'queued') return 'Queued';
+  if (run.status === 'failed') return 'Needs attention';
+  if (!step) return 'Waiting for runner';
+
+  if (step.status === 'failed') return 'Needs attention';
+  if (step.order_index <= 3) return 'Preparing workspace';
+  if (step.order_index === 4) return 'Preparing backend';
+  if (step.order_index === 5) return 'Building change';
+  if (step.order_index === 6) return 'Saving changes';
+  if (step.order_index === 7) return 'Checking change';
+  return 'Shipping change';
+}
+
+function completedStepCount(steps: AgentStep[]) {
+  return steps.filter((step) => ['passed', 'skipped'].includes(step.status)).length;
+}
+
+function failureSummary(steps: AgentStep[]) {
+  const failed = steps.find((step) => step.status === 'failed');
+  if (!failed?.details) return null;
+  const text = failed.details.replace(/\s+/g, ' ').trim();
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+}
+
 function plannerErrorText(error: unknown) {
   const raw = error instanceof Error ? error.message : String(error || 'Coding agent failed.');
   if (
@@ -94,8 +158,48 @@ function MessageBubble({ message }: { message: PendingMessage }) {
           message.pending && 'opacity-70',
         )}
       >
-        <div className="whitespace-pre-wrap">{message.content}</div>
+        <div className="whitespace-pre-wrap">{messageContentForDisplay(message)}</div>
       </div>
+    </div>
+  );
+}
+
+function RunExecutionPanel({
+  run,
+  steps,
+}: {
+  run: AgentRun;
+  steps: AgentStep[];
+}) {
+  const currentStep = getCurrentStep(steps);
+  const completed = completedStepCount(steps);
+  const total = steps.length;
+  const failedDetails = failureSummary(steps);
+  const phase = phaseLabel(currentStep, run);
+
+  return (
+    <div className="rounded-[0.65rem] border bg-background p-3 text-sm dark:border-white/10 dark:bg-white/[0.055]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <p className="text-xs uppercase text-muted-foreground">Build status</p>
+          <div className="flex min-w-0 items-center gap-2">
+            {run.status === 'running' ? <Loader2 className="size-4 shrink-0 animate-spin" /> : null}
+            <p className="truncate font-medium">{phase}</p>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {total > 0 ? `${completed} of ${total} steps complete` : 'Waiting for the runner to claim this build'}
+          </p>
+        </div>
+        <Badge variant={run.status === 'failed' ? 'destructive' : 'outline'}>
+          {statusLabel(run.status)}
+        </Badge>
+      </div>
+
+      {failedDetails ? (
+        <p className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-2 text-xs leading-5 text-destructive">
+          {failedDetails}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -114,15 +218,73 @@ export function FeaturePlanningChat({
   const [messages, setMessages] = useState<PendingMessage[]>(initialMessages);
   const [plan, setPlan] = useState<ChangeRequestPlan | null>(initialPlan);
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(latestRun ?? null);
+  const [currentSteps, setCurrentSteps] = useState<AgentStep[]>([]);
   const [input, setInput] = useState('');
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [planningStatus, setPlanningStatus] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const currentStep = getCurrentStep(currentSteps);
 
   const nextSortOrder = useMemo(
     () => (messages.at(-1)?.sort_order ?? -1) + 1,
     [messages],
   );
+
+  const recoverRunState = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/feature-requests/${request.id}/agent-run`, {
+        method: 'GET',
+        cache: 'no-store',
+      });
+
+      if (!response.ok) return;
+
+      const body = (await response.json()) as {
+        run?: AgentRun | null;
+        steps?: AgentStep[];
+      };
+
+      setCurrentRun(body.run ?? null);
+      setCurrentSteps(body.steps ?? []);
+    } catch {
+      // Recovery is best-effort; the existing chat state remains usable if it fails.
+    }
+  }, [request.id]);
+
+  useEffect(() => {
+    setMessages(initialMessages);
+    setPlan(initialPlan);
+    setCurrentRun(latestRun ?? null);
+    setCurrentSteps([]);
+    void recoverRunState();
+  }, [initialMessages, initialPlan, latestRun, recoverRunState]);
+
+  useEffect(() => {
+    const recoverWhenVisible = () => {
+      if (document.visibilityState === 'visible') void recoverRunState();
+    };
+    const recoverOnFocus = () => {
+      void recoverRunState();
+    };
+
+    document.addEventListener('visibilitychange', recoverWhenVisible);
+    window.addEventListener('focus', recoverOnFocus);
+
+    return () => {
+      document.removeEventListener('visibilitychange', recoverWhenVisible);
+      window.removeEventListener('focus', recoverOnFocus);
+    };
+  }, [recoverRunState]);
+
+  useEffect(() => {
+    if (!shouldRefreshRun(currentRun)) return;
+
+    const interval = window.setInterval(() => {
+      void recoverRunState();
+    }, 3000);
+
+    return () => window.clearInterval(interval);
+  }, [currentRun, recoverRunState]);
 
   async function sendMessage(text: string) {
     const trimmed = text.trim();
@@ -193,6 +355,11 @@ export function FeaturePlanningChat({
           activeAssistantMessage = nextAssistantMessage;
         }
 
+        if (event.type === 'run') {
+          setCurrentRun(event.payload.run);
+          void recoverRunState();
+        }
+
         if (event.type === 'status') {
           setPlanningStatus(event.message);
         }
@@ -215,7 +382,10 @@ export function FeaturePlanningChat({
 
         if (event.type === 'done') {
           if (event.payload.plan) setPlan(event.payload.plan);
-          if (event.payload.run) setCurrentRun(event.payload.run);
+          if (event.payload.run) {
+            setCurrentRun(event.payload.run);
+            void recoverRunState();
+          }
           setMessages((current) =>
             current.map((message) => {
               if (userMessage && message.id === userMessage.id && event.payload.userMessage) {
@@ -272,6 +442,7 @@ export function FeaturePlanningChat({
     } finally {
       setIsSendingMessage(false);
       setPlanningStatus(null);
+      void recoverRunState();
     }
   }
 
@@ -304,6 +475,7 @@ export function FeaturePlanningChat({
         ) : (
           messages.map((message) => <MessageBubble key={message.id} message={message} />)
         )}
+        {currentRun ? <RunExecutionPanel run={currentRun} steps={currentSteps} /> : null}
         {planningStatus ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Terminal className="size-3.5" />
@@ -334,8 +506,17 @@ export function FeaturePlanningChat({
             disabled={isSendingMessage}
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs text-muted-foreground">
-              {currentRun ? `Latest run: ${statusLabel(currentRun.status)}` : 'No run queued'}
+            <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+              {currentRun ? (
+                <>
+                  Latest run: {statusLabel(currentRun.status)}
+                  {currentStep || currentRun.status === 'queued'
+                    ? ` · ${phaseLabel(currentStep, currentRun)}`
+                    : null}
+                </>
+              ) : (
+                'No run queued'
+              )}
             </div>
             <div className="flex gap-2">
               <Button type="submit" disabled={isSendingMessage}>
