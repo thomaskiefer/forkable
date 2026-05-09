@@ -219,6 +219,7 @@ export async function streamPlanningMessage(input: {
   userId: string;
   accessToken: string;
   persistUserMessage?: boolean;
+  isInitialKickoff?: boolean;
 }) {
   const existingMessages = await getPlanningMessages(input.request.id, input.accessToken);
   const encoder = new TextEncoder();
@@ -242,7 +243,7 @@ export async function streamPlanningMessage(input: {
           request: input.request,
           messages: existingMessages,
           text: input.text,
-          isInitialKickoff: input.persistUserMessage === false,
+          isInitialKickoff: input.isInitialKickoff ?? input.persistUserMessage === false,
           onDelta: (delta) => writeEvent({ type: 'delta', content: delta }),
           onStatus: (message) => writeEvent({ type: 'status', message }),
         });
@@ -269,7 +270,9 @@ export async function streamPlanningMessage(input: {
             content: assistantText,
             metadata: {
               provider: 'codex_runner',
-              ...(input.persistUserMessage === false ? { kickoff: true } : {}),
+              ...(input.isInitialKickoff || input.persistUserMessage === false
+                ? { kickoff: true }
+                : {}),
             },
           },
         ];

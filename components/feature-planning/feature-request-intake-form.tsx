@@ -20,6 +20,27 @@ async function getErrorMessage(response: Response) {
   }
 }
 
+function acceptPlaceholderOnCmdRight(
+  event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
+) {
+  if (
+    (event.metaKey || event.ctrlKey) &&
+    event.key === 'ArrowRight' &&
+    !event.currentTarget.value
+  ) {
+    event.preventDefault();
+    const target = event.currentTarget;
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      target instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    nativeSetter?.call(target, target.placeholder);
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
 export function FeatureRequestIntakeForm() {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -44,8 +65,15 @@ export function FeatureRequestIntakeForm() {
 
       if (!response.ok) throw new Error(await getErrorMessage(response));
 
-      const body = (await response.json()) as { request: ChangeRequest };
-      toast.success('Feature request created.');
+      const body = (await response.json()) as {
+        request: ChangeRequest;
+        planningError?: string | null;
+      };
+      if (body.planningError) {
+        toast.warning(`Feature request created, but planning did not start: ${body.planningError}`);
+      } else {
+        toast.success('Feature request created and sent to planning.');
+      }
       shouldResetSubmitting = false;
       router.push(`/feature-requests?request=${body.request.id}`);
       router.refresh();
@@ -84,6 +112,7 @@ export function FeatureRequestIntakeForm() {
             name="title"
             className="h-11 px-4"
             placeholder="Sort Clients table by attribute"
+            onKeyDown={acceptPlaceholderOnCmdRight}
             required
           />
         </div>
@@ -95,6 +124,7 @@ export function FeatureRequestIntakeForm() {
             name="description"
             className="min-h-28 resize-none px-4 py-3"
             placeholder="Let users sort the Clients tab by company name, deal value, last activity, and ARR. Default sort: most recent activity."
+            onKeyDown={acceptPlaceholderOnCmdRight}
             required
           />
         </div>
