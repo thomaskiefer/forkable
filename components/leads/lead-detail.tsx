@@ -30,6 +30,7 @@ import {
 import { cn } from '@/lib/utils';
 import { ACTIVITY_TYPES, FOLLOW_UP_PRIORITIES } from '@/lib/constants';
 import type { DealApprovalRequest, Lead, LeadActivity, LeadFollowUp } from '@/lib/types';
+import type { AcmeClosePlanActionKey, AcmeClosePlanItem } from '@/lib/types';
 
 const currency = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -49,6 +50,12 @@ const statusTone: Record<string, string> = {
   contacted: 'bg-chart-2/15 text-chart-2 border-chart-2/30',
   qualified: 'bg-primary/12 text-primary border-primary/30',
   unqualified: 'bg-destructive/10 text-destructive border-destructive/30',
+};
+
+const acmeClosePlanLabels: Record<AcmeClosePlanActionKey, string> = {
+  confirm_legal_owner: 'Confirm legal owner',
+  attach_security_notes: 'Attach security notes',
+  schedule_procurement_follow_up: 'Schedule procurement follow-up',
 };
 
 function StatusPill({ status }: { status: string }) {
@@ -78,25 +85,33 @@ export function LeadDetail({
   followUps: initialFollowUps,
   approvals: initialApprovals,
   enterpriseApprovalsEnabled,
+  acmeClosePlanEnabled,
+  acmeClosePlanItems: initialAcmeClosePlanItems,
 }: {
   lead: Lead;
   activities: LeadActivity[];
   followUps: LeadFollowUp[];
   approvals: DealApprovalRequest[];
   enterpriseApprovalsEnabled: boolean;
+  acmeClosePlanEnabled: boolean;
+  acmeClosePlanItems: AcmeClosePlanItem[];
 }) {
   const router = useRouter();
   const [activities, setActivities] = useState(initialActivities);
   const [followUps, setFollowUps] = useState(initialFollowUps);
   const [approvals, setApprovals] = useState(initialApprovals);
+  const [acmeClosePlanItems, setAcmeClosePlanItems] = useState(initialAcmeClosePlanItems);
   const [showActivityForm, setShowActivityForm] = useState(false);
   const [showFollowUpForm, setShowFollowUpForm] = useState(false);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  const [closePlanLoading, setClosePlanLoading] = useState<AcmeClosePlanActionKey | null>(null);
 
   const activeApproval = approvals.find(
     (approval) => approval.status === 'pending' || approval.status === 'approved',
   );
   const approvalRequired = enterpriseApprovalsEnabled && lead.deal_value >= 50000;
+  const acmeClosePlanRequired = acmeClosePlanEnabled && lead.deal_value >= 50000;
+  const completedClosePlanItems = acmeClosePlanItems.filter((item) => item.completed_at).length;
 
   async function addActivity(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -218,6 +233,31 @@ export function LeadDetail({
       toast.error(error instanceof Error ? error.message : 'Failed to approve request');
     } finally {
       setApprovalLoading(false);
+    }
+  }
+
+  async function completeClosePlanItem(actionKey: AcmeClosePlanActionKey) {
+    setClosePlanLoading(actionKey);
+    try {
+      const res = await fetch(`/api/leads/${lead.id}/acme-close-plan`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actionKey,
+          notes: acmeClosePlanLabels[actionKey],
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? 'Failed to update close plan');
+      }
+      const items = await res.json();
+      setAcmeClosePlanItems(items);
+      toast.success('Close-plan action completed');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update close plan');
+    } finally {
+      setClosePlanLoading(null);
     }
   }
 
@@ -480,6 +520,75 @@ export function LeadDetail({
                     )}
                   </div>
                 )}
+              </div>
+            </section>
+          )}
+
+          {acmeClosePlanEnabled && (
+            <section
+              className={cn(
+                'space-y-4 rounded-2xl border p-6',
+                acmeClosePlanRequired ? 'border-primary/30 bg-primary/5' : 'bg-card/40',
+              )}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <p className="eyebrow flex items-center gap-2">
+                    <CheckCircle className="h-3.5 w-3.5" /> Acme close plan
+                  </p>
+                  <h3 className="font-display text-xl font-medium tracking-tight">
+                    {completedClosePlanItems} of 3 actions complete
+                  </h3>
+                  <p className="max-w-prose text-sm text-muted-foreground">
+                    Enterprise deals need these actions before Contract Sent or Closed Won.
+                  </p>
+                </div>
+                <span
+                  className={cn(
+                    'rounded-full border px-2.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-[0.18em]',
+                    completedClosePlanItems === 3
+                      ? 'border-primary/30 bg-primary/10 text-primary'
+                      : 'border-border text-muted-foreground',
+                  )}
+                >
+                  {completedClosePlanItems === 3 ? 'Ready' : 'Open'}
+                </span>
+              </div>
+
+              <div className="divide-y rounded-xl border bg-background">
+                {acmeClosePlanItems.map((item) => {
+                  const actionKey = item.action_key;
+                  const completed = Boolean(item.completed_at);
+                  return (
+                    <div
+                      key={actionKey}
+                      className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium">{acmeClosePlanLabels[actionKey]}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {completed && item.completed_at
+                            ? `Completed ${format(new Date(item.completed_at), 'MMM d, yyyy HH:mm')}`
+                            : 'Required before late-stage movement.'}
+                        </p>
+                      </div>
+                      {completed ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-[0.18em] text-primary">
+                          <CheckCircle className="h-3 w-3" /> Done
+                        </span>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => completeClosePlanItem(actionKey)}
+                          disabled={closePlanLoading === actionKey}
+                        >
+                          Complete
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </section>
           )}

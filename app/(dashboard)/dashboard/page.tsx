@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowUpRight,
   CalendarClock,
+  CheckCircle,
   GitPullRequestArrow,
   KanbanSquare,
   Plus,
@@ -14,7 +15,14 @@ import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
-import { getChangeRequests, getClients, getLeadStages, getLeads, getProjects } from '@/lib/queries';
+import {
+  getChangeRequests,
+  getClients,
+  getLeadStages,
+  getLeads,
+  getProjects,
+  hasFeatureFlag,
+} from '@/lib/queries';
 import { cn } from '@/lib/utils';
 
 const currency = new Intl.NumberFormat('en-US', {
@@ -73,12 +81,20 @@ function getOwner(id: unknown) {
 export default async function CRMOverviewPage() {
   const { accessToken: token } = await requireAuthenticatedSession();
 
-  const [leadsResult, clientsResult, stages, featureRequests, projectsResult] = await Promise.all([
+  const [
+    leadsResult,
+    clientsResult,
+    stages,
+    featureRequests,
+    projectsResult,
+    acmeClosePlanEnabled,
+  ] = await Promise.all([
     getLeads(token, 1, 50),
     getClients(token),
     getLeadStages(token),
     getChangeRequests(token),
     getProjects(token, 1, 50),
+    hasFeatureFlag('acme_dashboard_close_plan', token),
   ]);
 
   const allLeads = leadsResult.leads as Array<Record<string, unknown>>;
@@ -112,6 +128,17 @@ export default async function CRMOverviewPage() {
       return bValue - aValue;
     })
     .slice(0, 4);
+  const acmeClosePlanDeals = openLeads
+    .filter((lead) => {
+      const dealValue = typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0;
+      return dealValue >= 50000 && ['Security Review', 'Contract Sent', 'Proposal'].includes(getStageName(lead));
+    })
+    .sort((a, b) => {
+      const aValue = typeof a.deal_value === 'number' ? (a.deal_value as number) : 0;
+      const bValue = typeof b.deal_value === 'number' ? (b.deal_value as number) : 0;
+      return bValue - aValue;
+    })
+    .slice(0, 3);
   const projectQueue = (projectsResult.projects as Array<Record<string, unknown>>)
     .filter((project) => (project.deal_status as string) !== 'completed')
     .slice(0, 4);
@@ -356,6 +383,63 @@ export default async function CRMOverviewPage() {
       </section>
 
       <section className="grid gap-4 lg:grid-cols-2">
+        {acmeClosePlanEnabled ? (
+          <Card className="p-0 lg:col-span-2">
+            <CardContent className="p-6">
+              <div className="mb-5 flex items-start justify-between gap-3">
+                <div>
+                  <p className="eyebrow">Acme close plan</p>
+                  <h2 className="mt-1 font-display text-2xl font-medium tracking-tight">
+                    Enterprise deal actions
+                  </h2>
+                  <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+                    Confirm legal owner, attach security notes, and schedule procurement follow-up before advancing enterprise deals.
+                  </p>
+                </div>
+                <CheckCircle className="h-4 w-4 text-primary" />
+              </div>
+              <div className="grid gap-3 lg:grid-cols-3">
+                {[
+                  'Confirm legal owner',
+                  'Attach security notes',
+                  'Schedule procurement follow-up',
+                ].map((action) => (
+                  <div key={action} className="rounded-lg border bg-card px-4 py-3">
+                    <p className="text-sm font-medium">{action}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Required before Contract Sent or Closed Won.</p>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 divide-y rounded-lg border bg-background">
+                {acmeClosePlanDeals.length === 0 ? (
+                  <p className="px-4 py-3 text-sm text-muted-foreground">No late-stage enterprise deals need attention.</p>
+                ) : (
+                  acmeClosePlanDeals.map((lead) => (
+                    <Link
+                      key={lead.id as string}
+                      href={`/leads/${lead.id}`}
+                      className="group grid gap-3 px-4 py-3 transition-colors hover:bg-accent/40 sm:grid-cols-[1fr_auto] sm:items-center"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{lead.company_name as string}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {getStageName(lead)} · {getOwner(lead.id)}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3 sm:justify-end">
+                        <span className="font-display nums-tabular text-base font-medium tabular-nums">
+                          {currency.format(typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0)}
+                        </span>
+                        <ArrowUpRight className="h-4 w-4 text-muted-foreground transition-all group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-primary" />
+                      </div>
+                    </Link>
+                  ))
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
         <Card className="p-0">
           <CardContent className="p-6">
             <div className="mb-5 flex items-center justify-between gap-3">

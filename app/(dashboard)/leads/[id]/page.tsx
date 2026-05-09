@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
 import {
+  getAcmeClosePlanItems,
   getDealApprovalRequests,
   getLead,
   getLeadActivities,
@@ -17,15 +18,27 @@ export default async function LeadDetailPage({
   const { id } = await params;
   const { accessToken: token, viewer } = await requireAuthenticatedSession();
 
-  const [lead, activities, followUps, approvals, enterpriseApprovalsEnabled] = await Promise.all([
+  const [
+    lead,
+    activities,
+    followUps,
+    approvals,
+    enterpriseApprovalsEnabled,
+    acmeClosePlanEnabled,
+  ] = await Promise.all([
     getLead(id, token),
     getLeadActivities(id, token),
     getLeadFollowUps(id, token),
     getDealApprovalRequests(id, token),
     leadHasFeatureFlag(id, 'enterprise_deal_approvals', viewer.id!, token),
+    leadHasFeatureFlag(id, 'acme_dashboard_close_plan', viewer.id!, token),
   ]);
 
   if (!lead) notFound();
+
+  const acmeClosePlanItems = acmeClosePlanEnabled
+    ? await getAcmeClosePlanItems(id, token)
+    : [];
 
   return (
     <LeadDetail
@@ -34,6 +47,8 @@ export default async function LeadDetailPage({
       followUps={followUps}
       approvals={approvals}
       enterpriseApprovalsEnabled={enterpriseApprovalsEnabled}
+      acmeClosePlanEnabled={acmeClosePlanEnabled}
+      acmeClosePlanItems={acmeClosePlanItems}
     />
   );
 }
