@@ -344,7 +344,7 @@ export async function draftChangeRequestPlan(input: {
         customer_email: input.request.customer_email,
         feature_key: input.request.feature_key,
         planning_message_count: messages.length,
-        sources: ['change_request', 'planning_chat', 'nia_repo_context', 'nia_customer_context'],
+        sources: ['change_request', 'planning_chat', 'nia_repo_context', 'hyperspell_customer_context'],
       },
       userId: input.userId,
     },

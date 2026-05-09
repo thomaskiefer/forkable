@@ -448,7 +448,7 @@ function buildScheduledEvaluationPrompt(task) {
   return [
     "You are Forkable's scheduled automation evaluator.",
     '',
-    'Use Nia MCP for both customer context, including indexed Slack conversations, and codebase impact planning before recommending edits.',
+    'Use Hyperspell MCP first when available for customer context, then use Nia MCP to think through likely codebase impact before recommending edits.',
     'Keep this lightweight. Decide whether this scheduled task warrants a coding-agent run now.',
     '',
     'Scheduled task:',
@@ -561,7 +561,7 @@ async function createScheduledMonitorWork(task, execution, evaluation) {
 function buildScheduledPlanSnapshot(task, evaluation, customerName) {
   const summary = `${customerName} scheduled automation finding from ${task.task_type}.`;
   const implementationPlan = [
-    '1. Use Nia MCP to retrieve and verify customer context, including indexed Slack conversations, before deciding exact edits.',
+    '1. Use Hyperspell MCP first to retrieve and verify customer context before deciding exact edits.',
     '2. Use Nia MCP to inspect repository structure, migrations, RLS, data access, and UI impact before editing.',
     '3. Keep the implementation narrow to the scheduled finding and preserve behavior for unrelated customers.',
     '4. Run the configured verification commands and report changed files, tests, and residual risks.',
@@ -569,7 +569,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
   const codingAgentPrompt = [
     'This run was queued by a scheduled monitor_context automation.',
     '',
-    'Before editing, use Nia for customer context, including Slack when indexed, and codebase impact planning.',
+    'Before editing, use Hyperspell customer context first, then use Nia for codebase impact planning.',
     'Implement only the smallest useful change warranted by this finding.',
     '',
     'Scheduled task context:',
@@ -586,7 +586,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
     summary,
     implementation_plan: implementationPlan,
     acceptance_criteria: [
-      'Nia customer context is considered before code edits.',
+      'Hyperspell customer context is considered before code edits.',
       'Nia codebase impact planning is performed before code edits.',
       'The implementation is scoped to the scheduled automation finding.',
       'Verification results and changed files are reported for review.',
@@ -598,7 +598,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
       task_type: task.task_type,
       customer: customerName,
       evaluation_summary: evaluation.summary,
-      context_sources: ['scheduled_task', 'Nia customer context', 'Nia codebase impact planning'],
+      context_sources: ['scheduled_task', 'Hyperspell customer context', 'Nia codebase impact planning'],
     },
   };
 }
@@ -606,7 +606,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
 async function createAgentStepsForScheduledRun(run, planSnapshot, branchPart, userId) {
   const labels = [
     'Load scheduled automation plan and context bundle',
-    'Use Nia to inspect customer and Slack context',
+    'Use Hyperspell to inspect customer context',
     'Use Nia to inspect repo, migrations, RLS, and UI patterns',
     `Create Git branch feat/${branchPart}`,
     `Create InsForge backend branch ${branchPart}`,
@@ -947,7 +947,7 @@ function buildPlanningPrompt(body) {
     '',
     'Rules:',
     '- Ask only for missing decisions that materially affect implementation.',
-    '- Keep the plan grounded in Git branches, InsForge backend branches, Nia repository/customer context, backend enforcement, preview deploys, smoke tests, and developer review.',
+    '- Keep the plan grounded in Git branches, InsForge backend branches, Nia repository context, Hyperspell customer context, backend enforcement, preview deploys, smoke tests, and developer review.',
     '- Do not claim code has been changed.',
     '- Keep the reply concise and conversational.',
     '- If the request is ready, say it is ready to draft and send to the coding agent.',
@@ -988,6 +988,19 @@ function buildCodexConfig(workspace) {
       'url = "https://apigcp.trynia.ai/mcp"',
       'bearer_token_env_var = "NIA_API_KEY"',
       'required = false',
+      'tool_timeout_sec = 120',
+    );
+  }
+
+  if (process.env.HYPERSPELL_API_KEY && process.env.HYPERSPELL_USER_ID) {
+    parts.push(
+      '',
+      '[mcp_servers.hyperspell]',
+      'command = "npx"',
+      'args = ["-y", "@hyperspell/hyperspell-mcp@latest", "--client=codex", "--tools=all"]',
+      'env_vars = ["HYPERSPELL_API_KEY", "HYPERSPELL_USER_ID"]',
+      'required = false',
+      'startup_timeout_sec = 30',
       'tool_timeout_sec = 120',
     );
   }
@@ -1095,7 +1108,8 @@ function buildPrompt(run, context) {
     'Run constraints:',
     `- Work on Git branch ${run.git_branch}.`,
     `- Treat InsForge backend branch ${run.backend_branch} as the isolated backend target.`,
-    '- Use Nia MCP first when available to inspect customer context, indexed Slack conversations, repository structure, migrations, RLS policies, data access, and UI patterns before editing.',
+    '- Use Nia MCP first when available to inspect repository structure, migrations, RLS policies, data access, and UI patterns before editing.',
+    '- Use Hyperspell MCP when available only for customer/request context. Do not write unrelated memory.',
     '- Prefer additive migrations and small, reviewable UI changes.',
     '- Do not drop tables or columns.',
     '- Do not commit secrets, .env files, local state, or generated dependency folders.',
@@ -1410,6 +1424,7 @@ function redact(value) {
       .map(([, value]) => value),
     process.env.GITHUB_TOKEN,
     process.env.NIA_API_KEY,
+    process.env.HYPERSPELL_API_KEY,
     process.env.INSFORGE_ACCESS_TOKEN,
   ]) {
     if (secret) output = output.split(secret).join('[redacted]');
