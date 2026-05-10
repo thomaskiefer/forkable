@@ -631,9 +631,14 @@ async function hasRunningScheduledExecution(taskId) {
 async function processScheduledTask(task, options = {}) {
   log(`claimed scheduled task ${task.id}`);
   const chatMessages = await loadScheduledTaskChatMessages(task.id);
+  const slackContext = await loadNiaSlackContext(task).catch((error) => {
+    logError(error, { source: 'scheduled-task-nia-slack-context', taskId: task.id });
+    return null;
+  });
   const taskContext = {
     ...task,
     chat_messages: chatMessages,
+    slack_context: slackContext,
   };
   const execution = await createScheduledExecution(taskContext, options);
 
@@ -894,6 +899,107 @@ async function evaluateScheduledTask(task) {
   return parseScheduledEvaluation(content);
 }
 
+async function loadNiaSlackContext(task) {
+  if (!process.env.NIA_API_KEY && !state.niaConfigReady) return null;
+
+  const text = [
+    task.prompt,
+    task.instructions,
+    task.description,
+    ...(task.chat_messages || []).map((message) => message.content),
+  ].filter(Boolean).join('\n').toLowerCase();
+
+  if (!/\b(slack|message|messages|customer context|workspace)\b/.test(text)) {
+    return null;
+  }
+
+  const listResult = await execCommand('nia', ['slack', 'list'], {
+    captureOnly: true,
+    timeoutMs: 30 * 1000,
+  });
+  const installations = parseNiaSlackInstallations(listResult.stdout);
+  const contexts = [];
+
+  for (const installation of installations.slice(0, 3)) {
+    const channelsResult = await execCommand('nia', ['slack', 'channels', installation.id], {
+      captureOnly: true,
+      timeoutMs: 30 * 1000,
+    }).catch((error) => ({ stdout: error?.result?.stdout || '', stderr: error?.result?.stderr || '' }));
+    const channels = parseNiaSlackChannels(channelsResult.stdout);
+    const channelMessages = [];
+
+    for (const channel of channels.slice(0, 5)) {
+      const messagesResult = await execCommand(
+        'nia',
+        ['slack', 'messages', installation.id, '--channel', channel.name || channel.id, '--limit', '20'],
+        {
+          captureOnly: true,
+          timeoutMs: 30 * 1000,
+        },
+      ).catch((error) => ({ stdout: error?.result?.stdout || '', stderr: error?.result?.stderr || '' }));
+
+      channelMessages.push({
+        id: channel.id,
+        name: channel.name,
+        messages: trimForDb(messagesResult.stdout || messagesResult.stderr || 'No messages returned.'),
+      });
+    }
+
+    contexts.push({
+      id: installation.id,
+      team_name: installation.team_name,
+      channels: channelMessages,
+    });
+  }
+
+  return contexts.length
+    ? {
+        source: 'nia_slack',
+        installations: contexts,
+      }
+    : null;
+}
+
+function parseNiaSlackInstallations(output) {
+  const rows = [];
+  let current = null;
+
+  for (const line of String(output || '').split('\n')) {
+    const id = line.match(/^\s+id:\s+(.+)$/);
+    if (id) {
+      if (current?.id) rows.push(current);
+      current = { id: id[1].trim() };
+      continue;
+    }
+
+    const teamName = line.match(/^\s+team_name:\s+(.+)$/);
+    if (teamName && current) current.team_name = teamName[1].trim();
+  }
+
+  if (current?.id) rows.push(current);
+  return rows;
+}
+
+function parseNiaSlackChannels(output) {
+  const rows = [];
+  let current = null;
+
+  for (const line of String(output || '').split('\n')) {
+    const id = line.match(/^\s+id:\s+(.+)$/);
+    if (id) {
+      if (current?.id) rows.push(current);
+      current = { id: id[1].trim() };
+      continue;
+    }
+
+    const name = line.match(/^\s+name:\s+(.+)$/);
+    if (name && current) current.name = name[1].trim();
+  }
+
+  if (current?.id) rows.push(current);
+  return rows;
+}
+
 function parseScheduledEvaluation(content) {
   const text = String(content || '').trim();
   if (!text) throw new Error('Codex returned an empty scheduled automation result.');
@@ -985,6 +1091,7 @@ function buildScheduledEvaluationPrompt(task) {
     'Solve this scheduled automation task with Codex.',
     'Use available context and tools to produce the user-facing result. If the task only needs an answer, reminder, echo, report, or summary, return that in userMessage and set warranted to false.',
     'Set warranted to true only when this task requires a separate coding-agent implementation run.',
+    'If slack_context is present in the scheduled task JSON, use those Nia Slack messages directly. If more Slack context is needed, run `nia slack list`, `nia slack channels <id>`, and `nia slack messages <id> --channel <name> --limit 20`.',
     '',
     'Scheduled task:',
     JSON.stringify(task, null, 2),
