@@ -347,10 +347,8 @@ async function streamAgentRun(runId, response) {
   };
 
   try {
-    writeEvent({ type: 'status', message: 'Runner claimed coding run' });
     const result = await executeRun(run, {
       onDelta: (content) => writeEvent({ type: 'delta', content }),
-      onStatus: (message) => writeEvent({ type: 'status', message }),
     });
     writeEvent({
       type: 'done',
@@ -945,29 +943,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
 }
 
 async function createAgentStepsForScheduledRun(run, planSnapshot, branchPart, userId) {
-  const labels = [
-    'Load scheduled automation plan and context bundle',
-    'Use Hyperspell to inspect customer context',
-    'Use Nia to inspect repo, migrations, RLS, and UI patterns',
-    `Create Git branch feat/${branchPart}`,
-    `Create InsForge backend branch ${branchPart}`,
-    'Implement the scheduled automation finding',
-    'Deploy preview and run smoke tests',
-    'Merge, deploy, enable company flag, and notify requester',
-  ];
-
-  const { error } = await insforge.database
-    .from('agent_steps')
-    .insert(labels.map((label, index) => ({
-      run_id: run.id,
-      order_index: index + 1,
-      label,
-      status: index === 0 ? 'running' : 'pending',
-      details: index === 0 ? planSnapshot.summary : null,
-      user_id: userId,
-    })));
-
-  assertDb(error, 'Unable to create scheduled agent steps.');
+  await createRunEvent(run, 'summary', `Queued scheduled Codex run for ${planSnapshot.summary || branchPart}.\n`);
 }
 
 function calculateNextRunAt(task, fromDate = new Date()) {
@@ -1213,6 +1189,7 @@ async function prepareRepository(run, runDir) {
     cwd: repoRoot,
     logPath: path.join(runDir, 'git-config.log'),
   });
+  await writeFile(path.join(repoRoot, '.git', 'info', 'exclude'), '\n.forkable/\n', { flag: 'a' });
 
   await setStep(run.id, 2, 'passed', 'Reusable repository checkout refreshed to the latest target ref.');
   await setStep(run.id, 3, 'passed', `Git branch ready: ${run.git_branch || `feat/${run.id}`}`);
@@ -1268,6 +1245,7 @@ async function maybeCreateBackendBranch(run, workspace) {
 
 async function runCodex(run, context, workspace, runDir, streamHandlers = {}) {
   await setStep(run.id, 5, 'running', 'Codex is implementing the planned feature.');
+  await createRunEvent(run, 'summary', 'Codex started.\n');
 
   assertCodexAuthAvailable();
 
@@ -1275,8 +1253,20 @@ async function runCodex(run, context, workspace, runDir, streamHandlers = {}) {
   const finalPath = path.join(runDir, 'final.md');
   const promptPath = path.join(runDir, 'prompt.md');
   await prepareCodexHome(codexHome, workspace);
-  await writeFile(path.join(workspace, 'FORKABLE_RUNNER.md'), buildRunnerRunbook(run, context));
+  const runnerDir = path.join(workspace, '.forkable');
+  await mkdir(runnerDir, { recursive: true });
+  await writeFile(path.join(runnerDir, 'FORKABLE_RUNNER.md'), buildRunnerRunbook(run, context));
   await writeFile(promptPath, buildPrompt(run, context));
+
+  const eventHandler = createCodexPlanningEventHandler({
+    onDelta: (content) => {
+      void createRunEvent(run, 'delta', content);
+      streamHandlers.onDelta?.(content);
+    },
+    onStatus: (message) => {
+      void createRunEvent(run, 'status', `\n> ${message}\n`);
+    },
+  });
 
   await runCodexExec({
     codexHome,
@@ -1286,12 +1276,11 @@ async function runCodex(run, context, workspace, runDir, streamHandlers = {}) {
     logPath: path.join(runDir, 'codex.jsonl'),
     sandbox: 'workspace-write',
     timeoutMs: Number(process.env.FORKABLE_CODEX_TIMEOUT_MS || 45 * 60 * 1000),
-    onJsonEvent: streamHandlers.onDelta
-      ? createCodexPlanningEventHandler(streamHandlers)
-      : undefined,
+    onJsonEvent: eventHandler,
   });
 
   const finalMessage = await readTextIfExists(finalPath);
+  if (finalMessage) await createRunEvent(run, 'summary', `\n${finalMessage}\n`);
   await persistCodexAuth(codexHome);
   return { finalMessage };
 }
@@ -1306,6 +1295,7 @@ function buildRunnerRunbook(run, context) {
     '',
     'Default execution rules:',
     '- Make the smallest useful code/data change that satisfies the request.',
+    '- Move in one direct pass: inspect only the files needed, edit, commit, and deploy.',
     '- Do not run slow verification commands such as full production builds unless the request or a very risky edit makes them necessary.',
     '- Prefer quick targeted checks, syntax checks, or direct smoke checks over install/typecheck/build cycles.',
     '- If no code change is required, say so and finish immediately.',
@@ -1853,7 +1843,7 @@ function buildPrompt(run, context) {
   return [
     'You are the coding agent for Forkable.',
     '',
-    'Before doing anything else, read FORKABLE_RUNNER.md in the workspace and follow it. It is the operational runbook for this Compute run.',
+    'Before doing anything else, read .forkable/FORKABLE_RUNNER.md in the workspace and follow it. It is the operational runbook for this Compute run.',
     '',
     'Goal:',
     plan.coding_agent_prompt || plan.summary || context.request.description,
@@ -2016,11 +2006,12 @@ async function recordTestResults(run, checks) {
 async function maybeDeployPreview(run, workspace) {
   if (!config.deployPreview) return null;
 
+  const deployDir = await prepareDeploymentDirectory(workspace, path.join(workspace, '..', 'preview-deploy-workdir'));
   await execCommand(
     'npx',
     ['@insforge/cli', 'deployments', 'deploy', '.', '--json'],
     {
-      cwd: workspace,
+      cwd: deployDir,
       logPath: path.join(workspace, '..', 'preview-deploy.json'),
       env: insforgeCliEnv(),
       timeoutMs: 20 * 60 * 1000,
@@ -2103,11 +2094,12 @@ async function mergeFeatureBranch(run, workspace, runDir, commitSha) {
 async function maybeDeployProduction(workspace) {
   if (!config.deployProduction) return null;
 
+  const deployDir = await prepareDeploymentDirectory(workspace, path.join(workspace, '..', 'production-deploy-workdir'));
   await execCommand(
     'npx',
     ['@insforge/cli', 'deployments', 'deploy', '.', '--json'],
     {
-      cwd: workspace,
+      cwd: deployDir,
       logPath: path.join(workspace, '..', 'production-deploy.json'),
       env: insforgeCliEnv(),
       timeoutMs: 20 * 60 * 1000,
@@ -2120,6 +2112,18 @@ async function maybeDeployProduction(workspace) {
     url: deployment?.url || deployment?.deploymentUrl || deployment?.app_url || null,
     id: deployment?.id || deployment?.deployment_id || null,
   };
+}
+
+async function prepareDeploymentDirectory(workspace, deployDir) {
+  await rm(deployDir, { recursive: true, force: true });
+  await mkdir(deployDir, { recursive: true });
+  await execShell(`git archive --format=tar HEAD | tar -x -C ${shellQuote(deployDir)}`, {
+    cwd: workspace,
+    logPath: path.join(deployDir, '..', 'git-archive-deploy.log'),
+    timeoutMs: 2 * 60 * 1000,
+  });
+  await prepareInsforgeProjectLink(deployDir);
+  return deployDir;
 }
 
 function resolveFeatureKey(run, context) {
@@ -2333,6 +2337,27 @@ async function setStep(runId, orderIndex, status, details) {
 async function setStepFromRunDir(runDir, orderIndex, status, details) {
   const runId = path.basename(runDir);
   await setStep(runId, orderIndex, status, details);
+}
+
+async function createRunEvent(run, eventType, body, metadata = {}) {
+  if (!body) return;
+  const { error } = await insforge.database
+    .from('agent_run_events')
+    .insert([{
+      run_id: run.id,
+      event_type: eventType,
+      title: eventType === 'summary' ? 'Codex output' : 'Codex',
+      body: trimForDb(body),
+      metadata,
+      user_id: run.user_id,
+    }]);
+
+  if (error && /agent_run_events/i.test(error.message || '')) return;
+  assertDb(error, 'Unable to save Codex run output.');
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
 async function execShell(command, options = {}) {

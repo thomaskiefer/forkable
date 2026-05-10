@@ -241,6 +241,17 @@ export interface AgentStep {
   user_id: string;
 }
 
+export interface AgentRunEvent {
+  id: string;
+  run_id: string;
+  event_type: 'status' | 'thinking' | 'tool' | 'edit' | 'check' | 'summary' | 'error';
+  title: string;
+  body?: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  user_id: string;
+}
+
 export interface BranchPreview {
   id: string;
   run_id: string;

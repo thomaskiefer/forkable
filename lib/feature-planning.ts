@@ -128,20 +128,12 @@ function isRunnerAlreadyWorkingOnRun(error: unknown, runId: string) {
   );
 }
 
-function formatRunStatusMessage(run: AgentRun | null, steps: AgentStep[] = []) {
+function formatRunStatusMessage(run: AgentRun | null, _steps: AgentStep[] = []) {
   if (!run) {
     return 'No build has been queued for this request yet.';
   }
 
-  const lines = [`Current build status: ${run.status.replaceAll('_', ' ')}.`];
-  const activeStep = steps.find((step) => step.status === 'running');
-  const failedStep = [...steps].reverse().find((step) => step.status === 'failed');
-  const lastPassedStep = [...steps].reverse().find((step) => step.status === 'passed');
-  const visibleStep = activeStep ?? failedStep ?? lastPassedStep;
-
-  if (visibleStep) {
-    lines.push(`Latest step: ${visibleStep.label}.`);
-  }
+  const lines = [`Current run: ${run.status.replaceAll('_', ' ')}.`];
 
   if (run.preview_url) {
     lines.push(`Deployment: ${run.preview_url}`);
@@ -151,12 +143,14 @@ function formatRunStatusMessage(run: AgentRun | null, steps: AgentStep[] = []) {
     lines.push(`Runner note: ${run.runner_error}`);
   }
 
-  lines.push(`Run details: /feature-runs/${run.id}`);
+  if (run.output_summary) {
+    lines.push('', run.output_summary);
+  }
 
   if (['queued', 'running'].includes(run.status)) {
-    lines.push('The background runner has this run. I will post a completion update when it finishes. The Run page has the most current step-by-step progress.');
+    lines.push('The Codex run is still active. I will post the final output here when it finishes.');
   } else if (run.status === 'merged') {
-    lines.push('This has been merged, deployed, and enabled according to the run record.');
+    lines.push('Merged and deployed.');
   } else if (run.status === 'failed') {
     lines.push('This needs attention before it can be deployed.');
   }
@@ -659,8 +653,8 @@ export async function streamImplementationMessage(input: {
             runId: run.id,
             onDelta: (delta) => {
               assistantText += delta;
+              writeEvent({ type: 'delta', content: delta });
             },
-            onStatus: (message) => writeEvent({ type: 'status', message }),
           });
         } catch (error) {
           if (!isRunnerAlreadyWorkingOnRun(error, run.id)) throw error;
@@ -700,9 +694,9 @@ export async function streamImplementationMessage(input: {
 
         const completedRun = await getAgentRun(run.id, input.accessToken);
         const tests = await getTestResults(run.id, input.accessToken);
-        const testsPassed = tests.filter((test) => test.status === 'passed').length;
+        const testsPassed = tests.filter((test: { status?: string }) => test.status === 'passed').length;
         const rawOutput = (completedRun?.output_summary || finalContent || assistantText || '').trim();
-        const finalAssistantText = buildFriendlyCompletionMessage({
+        const finalAssistantText = rawOutput || buildFriendlyCompletionMessage({
           rawOutput,
           runStatus: completedRun?.status ?? run.status,
           testsPassed,
