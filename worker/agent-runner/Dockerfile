@@ -11,6 +11,7 @@ RUN apt-get update \
     openssh-client \
     pipx \
     python3 \
+    ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @openai/codex@0.130.0 @insforge/cli@latest @nozomioai/nia@0.5.2 pnpm@latest
