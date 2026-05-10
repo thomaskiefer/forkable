@@ -630,15 +630,20 @@ async function hasRunningScheduledExecution(taskId) {
 
 async function processScheduledTask(task, options = {}) {
   log(`claimed scheduled task ${task.id}`);
-  const execution = await createScheduledExecution(task, options);
+  const chatMessages = await loadScheduledTaskChatMessages(task.id);
+  const taskContext = {
+    ...task,
+    chat_messages: chatMessages,
+  };
+  const execution = await createScheduledExecution(taskContext, options);
 
   try {
-    const evaluation = await evaluateScheduledTask(task);
+    const evaluation = await evaluateScheduledTask(taskContext);
     let result = { warranted: false, reason: evaluation.summary || 'No work warranted.' };
     let created = null;
 
-    if (['monitor_context', 'queue_agent'].includes(task.task_type) && evaluation.warranted) {
-      created = await createScheduledMonitorWork(task, execution, evaluation);
+    if (['monitor_context', 'queue_agent'].includes(taskContext.task_type) && evaluation.warranted) {
+      created = await createScheduledMonitorWork(taskContext, execution, evaluation);
       result = {
         warranted: true,
         reason: `Queued scheduled monitor run ${created.run.id} for change request ${created.request.id}.`,
@@ -651,25 +656,25 @@ async function processScheduledTask(task, options = {}) {
       result_summary: trimForDb(result.reason),
       updated_at: new Date().toISOString(),
     });
-    await createScheduledTaskNotification(task, execution, {
+    await createScheduledTaskNotification(taskContext, execution, {
       evaluation,
       result,
       created,
     }).catch((notificationError) => logError(notificationError, {
       source: 'scheduled-task-notification',
-      taskId: task.id,
+      taskId: taskContext.id,
       executionId: execution.id,
     }));
-    await createScheduledTaskChatMessage(task, execution, formatScheduledTaskChatResult({
+    await createScheduledTaskChatMessage(taskContext, execution, formatScheduledTaskChatResult({
       evaluation,
       result,
       created,
     })).catch((messageError) => logError(messageError, {
       source: 'scheduled-task-chat-message',
-      taskId: task.id,
+      taskId: taskContext.id,
       executionId: execution.id,
     }));
-    await finalizeOneShotTask(task);
+    await finalizeOneShotTask(taskContext);
   } catch (error) {
     const errorMessage = formatError(error);
     await updateScheduledExecution(execution.id, {
@@ -695,19 +700,30 @@ async function processScheduledTask(task, options = {}) {
       user_id: task.user_id,
     }).catch((notificationError) => logError(notificationError, {
       source: 'scheduled-task-notification',
-      taskId: task.id,
+      taskId: taskContext.id,
     }));
-    await createScheduledTaskChatMessage(task, execution, `Run failed: ${errorMessage}`).catch((messageError) => logError(messageError, {
+    await createScheduledTaskChatMessage(taskContext, execution, `Run failed: ${errorMessage}`).catch((messageError) => logError(messageError, {
       source: 'scheduled-task-chat-message',
-      taskId: task.id,
+      taskId: taskContext.id,
       executionId: execution.id,
     }));
-    await finalizeOneShotTask(task).catch((finalizeError) => logError(finalizeError, {
+    await finalizeOneShotTask(taskContext).catch((finalizeError) => logError(finalizeError, {
       source: 'scheduled-task-finalize-once',
-      taskId: task.id,
+      taskId: taskContext.id,
     }));
     throw error;
   }
+}
+
+async function loadScheduledTaskChatMessages(taskId) {
+  const { data, error } = await insforge.database
+    .from('scheduled_agent_messages')
+    .select('role, content, sort_order, created_at, metadata')
+    .eq('task_id', taskId)
+    .order('sort_order', { ascending: true });
+
+  assertDb(error, 'Unable to load scheduled agent chat context.');
+  return data || [];
 }
 
 async function createScheduledExecution(task, options = {}) {
@@ -725,6 +741,17 @@ async function createScheduledExecution(task, options = {}) {
       metadata: {
         trigger_type: triggerType,
         requested_by: options.requestedBy || null,
+      },
+      context_snapshot: {
+        task: {
+          id: task.id,
+          title: task.title,
+          prompt: task.prompt,
+          task_type: task.task_type,
+          schedule_type: task.schedule_type,
+          schedule_label: task.schedule_label,
+        },
+        chat_messages: task.chat_messages || [],
       },
     }])
     .select('*');
