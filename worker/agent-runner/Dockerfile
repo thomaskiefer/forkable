@@ -13,7 +13,7 @@ RUN apt-get update \
     python3 \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex@0.130.0 @insforge/cli@latest @nozomioai/nia@0.5.2
+RUN npm install -g @openai/codex@0.130.0 @insforge/cli@latest @nozomioai/nia@0.5.2 pnpm@latest
 
 WORKDIR /app
 
@@ -21,6 +21,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY src ./src
+COPY skills ./skills
 
 EXPOSE 8080
 

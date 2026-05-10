@@ -1,11 +1,12 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import {
   chmod,
   copyFile,
+  cp,
   mkdir,
   readFile,
   rm,
@@ -16,6 +17,7 @@ import path from 'node:path';
 import { createClient } from '@insforge/sdk';
 
 const runnerId = process.env.FORKABLE_AGENT_RUNNER_ID || `compute-${randomUUID()}`;
+const bundledSkillsDir = path.join(process.cwd(), 'skills');
 const config = {
   enabled: process.env.FORKABLE_AGENT_RUNNER_ENABLED === 'true',
   port: Number(process.env.PORT || 8080),
@@ -64,6 +66,9 @@ const state = {
   codexAuthReady: false,
   insforgeCliAuthReady: false,
   niaConfigReady: false,
+  niaSlackReady: false,
+  niaSlackInstallations: 0,
+  niaSlackError: null,
   lastError: null,
   lastRunAt: null,
   startedAt: new Date().toISOString(),
@@ -74,6 +79,7 @@ await mkdir(config.workdir, { recursive: true });
 await mkdir(config.codexHome, { recursive: true });
 await bootstrapInsforgeCliAuth();
 await bootstrapNiaConfig();
+await verifyNiaSlackConfig();
 await bootstrapCodexAuth();
 
 if (config.enabled) {
@@ -89,6 +95,11 @@ function requireEnv(key) {
     throw new Error(`Missing required environment variable ${key}`);
   }
   return value;
+}
+
+function shortHash(value) {
+  if (!value) return null;
+  return createHash('sha256').update(String(value)).digest('hex').slice(0, 12);
 }
 
 function parseCommandList(raw) {
@@ -134,6 +145,11 @@ function startHealthServer() {
         insforgeCliAuthMode: getInsforgeCliAuthMode(),
         niaMcpConfigured: Boolean(process.env.NIA_API_KEY),
         niaCliConfigMode: state.niaConfigReady ? 'config_file' : 'missing',
+        niaSlackReady: state.niaSlackReady,
+        niaSlackInstallations: state.niaSlackInstallations,
+        niaSlackError: state.niaSlackError,
+        niaApiKeyHash: shortHash(process.env.NIA_API_KEY || ''),
+        niaConfigHash: shortHash(config.niaConfigJson || process.env.NIA_CONFIG_JSON || ''),
         lastError: state.lastError,
         lastRunAt: state.lastRunAt,
         startedAt: state.startedAt,
@@ -915,25 +931,34 @@ async function loadNiaSlackContext(task) {
 
   const listResult = await execCommand('nia', ['slack', 'list'], {
     captureOnly: true,
+    env: niaCliEnv(),
     timeoutMs: 30 * 1000,
   });
   const installations = parseNiaSlackInstallations(listResult.stdout);
+  state.niaSlackInstallations = installations.length;
+  state.niaSlackReady = installations.length > 0;
+  state.niaSlackError = installations.length > 0 ? null : 'No Nia Slack installations found.';
+
   const contexts = [];
+  const searchTerms = extractNiaSlackSearchTerms(task);
 
   for (const installation of installations.slice(0, 3)) {
     const channelsResult = await execCommand('nia', ['slack', 'channels', installation.id], {
       captureOnly: true,
+      env: niaCliEnv(),
       timeoutMs: 30 * 1000,
     }).catch((error) => ({ stdout: error?.result?.stdout || '', stderr: error?.result?.stderr || '' }));
     const channels = parseNiaSlackChannels(channelsResult.stdout);
+    const selectedChannels = selectNiaSlackChannels(channels, task);
     const channelMessages = [];
 
-    for (const channel of channels.slice(0, 5)) {
+    for (const channel of selectedChannels) {
       const messagesResult = await execCommand(
         'nia',
         ['slack', 'messages', installation.id, '--channel', channel.name || channel.id, '--limit', '20'],
         {
           captureOnly: true,
+          env: niaCliEnv(),
           timeoutMs: 30 * 1000,
         },
       ).catch((error) => ({ stdout: error?.result?.stdout || '', stderr: error?.result?.stderr || '' }));
@@ -945,10 +970,29 @@ async function loadNiaSlackContext(task) {
       });
     }
 
+    const searchResults = [];
+    for (const term of searchTerms.slice(0, 6)) {
+      const searchResult = await execCommand(
+        'nia',
+        ['slack', 'grep', installation.id, term, '--limit', '10'],
+        {
+          captureOnly: true,
+          env: niaCliEnv(),
+          timeoutMs: 30 * 1000,
+        },
+      ).catch((error) => ({ stdout: error?.result?.stdout || '', stderr: error?.result?.stderr || '' }));
+
+      searchResults.push({
+        query: term,
+        results: trimForDb(searchResult.stdout || searchResult.stderr || 'No matching Slack messages returned.'),
+      });
+    }
+
     contexts.push({
       id: installation.id,
       team_name: installation.team_name,
       channels: channelMessages,
+      searches: searchResults,
     });
   }
 
@@ -958,6 +1002,85 @@ async function loadNiaSlackContext(task) {
         installations: contexts,
       }
     : null;
+}
+
+function niaCliEnv() {
+  return {
+    ...process.env,
+    HOME: process.env.HOME || '/root',
+    NIA_CONFIG_HOME: config.niaConfigHome,
+    NIA_API_KEY: process.env.NIA_API_KEY || '',
+  };
+}
+
+function extractNiaSlackSearchTerms(task) {
+  const text = [
+    task.title,
+    task.prompt,
+    task.instructions,
+    task.description,
+    task.customer_name,
+    task.customer_email,
+    ...(task.chat_messages || []).map((message) => message.content),
+  ].filter(Boolean).join('\n');
+  const terms = [];
+
+  for (const match of text.matchAll(/#([a-z0-9][a-z0-9_-]{1,80})/gi)) {
+    terms.push(match[1].replaceAll('-', ' '));
+  }
+
+  for (const match of text.matchAll(/\*([^*\n]{3,80})\*/g)) {
+    terms.push(match[1]);
+  }
+
+  for (const phrase of [
+    'approval gate',
+    'legal review',
+    'security review',
+    'renewal',
+    'expansion',
+    'regional pipeline',
+    'risk score',
+    'implementation risk',
+    'feature request',
+  ]) {
+    if (text.toLowerCase().includes(phrase)) terms.push(phrase);
+  }
+
+  for (const word of text.match(/\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,3}\b/g) || []) {
+    if (!/^(Every|Use|If|Nia|Slack|Hyperspell|Forkable|CRM|The|This|A|I)$/.test(word)) {
+      terms.push(word);
+    }
+  }
+
+  return dedupe(terms
+    .map((term) => term.replace(/\s+/g, ' ').trim())
+    .filter((term) => term.length >= 3 && term.length <= 80));
+}
+
+function selectNiaSlackChannels(channels, task) {
+  const text = [
+    task.title,
+    task.prompt,
+    task.instructions,
+    task.description,
+    ...(task.chat_messages || []).map((message) => message.content),
+  ].filter(Boolean).join('\n').toLowerCase();
+
+  return [...channels]
+    .map((channel, index) => {
+      const name = String(channel.name || '').toLowerCase();
+      const normalizedName = name.replaceAll('-', ' ');
+      let score = Math.max(0, 20 - index);
+      if (name && text.includes(`#${name}`)) score += 80;
+      if (normalizedName && text.includes(normalizedName)) score += 40;
+      if (name.includes('acme') || name.includes('all')) score += 25;
+      if (name.includes('legal') || name.includes('approval')) score += 20;
+      return { channel, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map((item) => item.channel);
 }
 
 function parseNiaSlackInstallations(output) {
@@ -978,6 +1101,10 @@ function parseNiaSlackInstallations(output) {
 
   if (current?.id) rows.push(current);
   return rows;
+}
+
+function dedupe(values) {
+  return [...new Set(values)];
 }
 
 function parseNiaSlackChannels(output) {
@@ -1226,15 +1353,15 @@ async function createScheduledMonitorWork(task, execution, evaluation) {
 function buildScheduledPlanSnapshot(task, evaluation, customerName) {
   const summary = `${customerName} scheduled automation finding.`;
   const implementationPlan = [
-    '1. Use Hyperspell MCP first to retrieve and verify customer context before deciding exact edits.',
-    '2. Use Nia MCP to inspect repository structure, migrations, RLS, data access, and UI impact before editing.',
+    '1. Use Nia MCP first to retrieve Slack/customer context and inspect repository structure, migrations, RLS, data access, and UI impact before editing.',
+    '2. Use Hyperspell MCP only as supplemental customer context if it is configured.',
     '3. Keep the implementation narrow to the scheduled finding and preserve behavior for unrelated customers.',
     '4. Run the configured verification commands and report changed files, tests, and residual risks.',
   ].join('\n');
   const codingAgentPrompt = [
     'This run was queued by a scheduled automation.',
     '',
-    'Before editing, use Hyperspell customer context first, then use Nia for codebase impact planning.',
+    'Before editing, use Nia for Slack/customer context and codebase impact planning. Use Hyperspell only as supplemental customer context if it is configured.',
     'Implement only the smallest useful change warranted by this finding.',
     '',
     'Scheduled task context:',
@@ -1261,7 +1388,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
       scheduled_task_id: task.id,
       customer: customerName,
       evaluation_summary: evaluation.summary,
-      context_sources: ['scheduled_task', 'Hyperspell customer context', 'Nia codebase impact planning'],
+      context_sources: ['scheduled_task', 'Nia Slack/customer context', 'Nia codebase impact planning', 'optional Hyperspell customer context'],
     },
   };
 }
@@ -1647,8 +1774,15 @@ function buildRunnerRunbook(run, context) {
     '- Use quick checks only, mainly `git diff --check` and targeted file inspection.',
     '- Make the smallest code/data change that satisfies the request.',
     '- Commit, push the feature branch, merge to main, push main, then deploy production with `npx @insforge/cli deployments deploy . --json`.',
+    '- If production deploy fails, inspect the immediate error once, fix a clear project error if present, then retry once. If it still fails, stop and report the deploy failure instead of looping.',
     '- Enable the requesting company feature flag if the change uses one.',
     '- Do not invent or mention preview URLs.',
+    '',
+    'Available skills in this Compute runner:',
+    '- `insforge`: use for app code with `@insforge/sdk`, auth, database CRUD, storage, functions, realtime, AI, email, and payments SDK work.',
+    '- `insforge-cli`: use for InsForge infrastructure, migrations, SQL, RLS, deployments, compute, secrets, schedules, and backend branches. Always use `npx @insforge/cli`.',
+    '- `insforge-debug`: use when InsForge SDK/API/deploy/compute/database behavior fails and you need diagnostics.',
+    '- `insforge-integrations`: use for external auth providers and x402 payment facilitator work.',
     '',
     'Current run:',
     `- Run id: ${run.id}`,
@@ -2128,12 +2262,23 @@ function normalizeCodexReasoningEffort(value) {
 async function prepareCodexHome(codexHome, workspace, options = {}) {
   await mkdir(codexHome, { recursive: true });
   await writeFile(path.join(codexHome, 'config.toml'), buildCodexConfig(workspace, options));
+  await installBundledSkills(codexHome);
 
   const sourceAuthPath = path.join(config.codexHome, 'auth.json');
   if (await exists(sourceAuthPath)) {
     await copyFile(sourceAuthPath, path.join(codexHome, 'auth.json'));
     await chmod(path.join(codexHome, 'auth.json'), 0o600);
   }
+}
+
+async function installBundledSkills(codexHome) {
+  if (!(await exists(bundledSkillsDir))) return;
+
+  await mkdir(path.join(codexHome, 'skills'), { recursive: true });
+  await cp(bundledSkillsDir, path.join(codexHome, 'skills'), {
+    force: true,
+    recursive: true,
+  });
 }
 
 async function bootstrapCodexAuth() {
@@ -2179,14 +2324,10 @@ async function bootstrapNiaConfig() {
   await mkdir(config.niaConfigHome, { recursive: true });
 
   const configPath = path.join(config.niaConfigHome, 'config.json');
-  if (await exists(configPath)) {
-    state.niaConfigReady = true;
-    return;
-  }
-
   if (config.niaConfigJson) {
     await writeFile(configPath, config.niaConfigJson);
     await chmod(configPath, 0o600);
+    await writeNiaApiKeyFile();
     state.niaConfigReady = true;
     return;
   }
@@ -2199,7 +2340,37 @@ async function bootstrapNiaConfig() {
     apiKey: process.env.NIA_API_KEY,
   }, null, 2));
   await chmod(configPath, 0o600);
+  await writeNiaApiKeyFile();
   state.niaConfigReady = true;
+}
+
+async function writeNiaApiKeyFile() {
+  if (!process.env.NIA_API_KEY) return;
+
+  const apiKeyPath = path.join(config.niaConfigHome, 'api_key');
+  await writeFile(apiKeyPath, process.env.NIA_API_KEY);
+  await chmod(apiKeyPath, 0o600);
+}
+
+async function verifyNiaSlackConfig() {
+  if (!process.env.NIA_API_KEY && !state.niaConfigReady) return;
+
+  try {
+    const result = await execCommand('nia', ['slack', 'list'], {
+      captureOnly: true,
+      env: niaCliEnv(),
+      timeoutMs: 30 * 1000,
+    });
+    const installations = parseNiaSlackInstallations(result.stdout);
+    state.niaSlackInstallations = installations.length;
+    state.niaSlackReady = installations.length > 0;
+    state.niaSlackError = installations.length > 0 ? null : 'No Nia Slack installations found.';
+  } catch (error) {
+    state.niaSlackReady = false;
+    state.niaSlackInstallations = 0;
+    state.niaSlackError = trimForDb(formatError(error));
+    logError(error, { source: 'nia-slack-config-check' });
+  }
 }
 
 function getSeededJson(rawKey, encodedKey) {
