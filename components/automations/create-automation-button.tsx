@@ -30,7 +30,6 @@ export function CreateAutomationButton() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: 'Automation setup',
-          task_type: 'monitor_context',
           status: 'draft',
         }),
       });

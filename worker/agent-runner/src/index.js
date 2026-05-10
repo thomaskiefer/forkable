@@ -642,11 +642,11 @@ async function processScheduledTask(task, options = {}) {
     let result = { warranted: false, reason: evaluation.summary || 'No work warranted.' };
     let created = null;
 
-    if (['monitor_context', 'queue_agent'].includes(taskContext.task_type) && evaluation.warranted) {
+    if (evaluation.warranted) {
       created = await createScheduledMonitorWork(taskContext, execution, evaluation);
       result = {
         warranted: true,
-        reason: `Queued scheduled monitor run ${created.run.id} for change request ${created.request.id}.`,
+        reason: `Queued scheduled Codex run ${created.run.id} for change request ${created.request.id}.`,
       };
     }
 
@@ -889,54 +889,23 @@ async function createScheduledTaskChatMessage(task, execution, content) {
 }
 
 async function evaluateScheduledTask(task) {
-  if (task.task_type === 'report_only') {
-    return buildReportOnlyScheduledEvaluation(task);
-  }
-
-  const fallback = buildScheduledEvaluationFallback(task);
-  if (getCodexAuthMode() === 'none') return fallback;
-
-  try {
-    const content = await runCodexScheduledEvaluation(task);
-    return parseScheduledEvaluation(content, fallback, task);
-  } catch (error) {
-    logError(error, { source: 'scheduled-task-evaluation', taskId: task.id });
-    return fallback;
-  }
+  assertCodexAuthAvailable();
+  const content = await runCodexScheduledEvaluation(task);
+  return parseScheduledEvaluation(content);
 }
 
-function buildReportOnlyScheduledEvaluation(task) {
-  const prompt = String(task.prompt || task.instructions || task.description || '').trim();
-  const echo = prompt.match(/^echo(?:\s+the\s+message:?)?\s+(.+)$/i);
-  const summary = echo ? echo[1].trim() : prompt || 'Scheduled automation ran.';
-  return {
-    summary,
-    raw: null,
-    warranted: false,
-  };
-}
-
-function inferWorkWarranted(content, task) {
-  return task.task_type === 'queue_agent';
-}
-
-function parseScheduledEvaluation(content, fallback, task) {
+function parseScheduledEvaluation(content) {
   const text = String(content || '').trim();
-  if (!text) return fallback;
+  if (!text) throw new Error('Codex returned an empty scheduled automation result.');
 
   const parsed = parseJsonObject(text);
-  if (parsed) {
-    return {
-      summary: sanitizeScheduledEvaluationSummary(parsed.userMessage || parsed.summary || fallback.summary),
-      raw: text,
-      warranted: task.task_type === 'queue_agent' ? true : parsed.warranted === true,
-    };
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Codex returned invalid scheduled automation JSON.');
   }
-
   return {
-    summary: sanitizeScheduledEvaluationSummary(text || fallback.summary),
+    summary: sanitizeScheduledEvaluationSummary(parsed.userMessage || parsed.summary || 'Automation ran.'),
     raw: text,
-    warranted: inferWorkWarranted(text, task),
+    warranted: parsed.warranted === true,
   };
 }
 
@@ -1013,9 +982,9 @@ function buildScheduledEvaluationPrompt(task) {
   return [
     "You are Forkable's scheduled automation evaluator.",
     '',
-    'Use Hyperspell MCP first when available for customer context, then use Nia MCP to think through likely codebase impact before recommending edits.',
-    'Keep this lightweight. Decide whether this scheduled task warrants a coding-agent run now.',
-    'Do not queue or recommend a coding-agent run for data lookup, Slack/message summarization, reminders, or status reports.',
+    'Solve this scheduled automation task with Codex.',
+    'Use available context and tools to produce the user-facing result. If the task only needs an answer, reminder, echo, report, or summary, return that in userMessage and set warranted to false.',
+    'Set warranted to true only when this task requires a separate coding-agent implementation run.',
     '',
     'Scheduled task:',
     JSON.stringify(task, null, 2),
@@ -1027,20 +996,8 @@ function buildScheduledEvaluationPrompt(task) {
       reason: 'short internal reason',
     }, null, 2),
     '',
-    'Set warranted to true only when a code change should be built by a coding agent.',
+    'Never mention internal setup, task types, acceptance criteria, or planning mechanics in userMessage.',
   ].join('\n');
-}
-
-function buildScheduledEvaluationFallback(task) {
-  return {
-    summary: [
-      `Scheduled task ${task.id} (${task.task_type || 'unknown'}) was evaluated by deterministic fallback.`,
-      task.prompt ? `Prompt: ${task.prompt}` : '',
-      task.context ? `Context: ${JSON.stringify(task.context)}` : '',
-    ].filter(Boolean).join('\n'),
-    raw: null,
-    warranted: task.task_type === 'queue_agent',
-  };
 }
 
 async function resolveCompanyAccountIdForEmail(email) {
@@ -1068,7 +1025,7 @@ async function createScheduledMonitorWork(task, execution, evaluation) {
   const branchPart = slugifyBranchPart(`${customerName}-scheduled-automation`);
   const title = `${customerName} scheduled automation finding`;
   const description = trimForDb([
-    'A scheduled monitor_context automation found work that should be reviewed and implemented.',
+    'A scheduled automation found work that should be reviewed and implemented.',
     '',
     'Prompt/context summary:',
     evaluation.summary,
@@ -1160,7 +1117,7 @@ async function createScheduledMonitorWork(task, execution, evaluation) {
 }
 
 function buildScheduledPlanSnapshot(task, evaluation, customerName) {
-  const summary = `${customerName} scheduled automation finding from ${task.task_type}.`;
+  const summary = `${customerName} scheduled automation finding.`;
   const implementationPlan = [
     '1. Use Hyperspell MCP first to retrieve and verify customer context before deciding exact edits.',
     '2. Use Nia MCP to inspect repository structure, migrations, RLS, data access, and UI impact before editing.',
@@ -1168,7 +1125,7 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
     '4. Run the configured verification commands and report changed files, tests, and residual risks.',
   ].join('\n');
   const codingAgentPrompt = [
-    'This run was queued by a scheduled monitor_context automation.',
+    'This run was queued by a scheduled automation.',
     '',
     'Before editing, use Hyperspell customer context first, then use Nia for codebase impact planning.',
     'Implement only the smallest useful change warranted by this finding.',
@@ -1176,7 +1133,6 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
     'Scheduled task context:',
     JSON.stringify({
       task_id: task.id,
-      task_type: task.task_type,
       prompt: task.prompt || null,
       context: task.context || null,
       evaluation: evaluation.summary,
@@ -1196,7 +1152,6 @@ function buildScheduledPlanSnapshot(task, evaluation, customerName) {
     context_bundle: {
       source: 'scheduled_agent_task',
       scheduled_task_id: task.id,
-      task_type: task.task_type,
       customer: customerName,
       evaluation_summary: evaluation.summary,
       context_sources: ['scheduled_task', 'Hyperspell customer context', 'Nia codebase impact planning'],
@@ -1678,7 +1633,6 @@ function buildAutomationSetupPrompt(body) {
       status: 'configured | needs_more_info',
       title: 'short automation title',
       prompt: 'the durable automation instructions',
-      taskType: 'report_only | monitor_context | queue_agent',
       cronExpression: 'cron in minute hour * * * form, or null',
       scheduleLabel: 'human-readable schedule, or null',
       scheduleType: 'daily | weekly | monthly | cron | manual',
@@ -1691,10 +1645,6 @@ function buildAutomationSetupPrompt(body) {
     '- If timing is missing or ambiguous, set status to needs_more_info and ask one concise question.',
     '- For "every day at 3:23 pm PT", use cronExpression "23 15 * * *", scheduleType "daily", timezone "America/Los_Angeles".',
     '- For weekdays, use cronExpression with day-of-week 1-5.',
-    '- Use taskType "report_only" for reminders, echo requests, status notes, or simple one-shot messages that do not need code changes.',
-    '- Use taskType "report_only" for Slack/message/customer-context summaries where the requested output is only a summary.',
-    '- Use taskType "monitor_context" for watch/check/monitor requests that may require customer or repo context before deciding what to do later.',
-    '- Use taskType "queue_agent" only when the user explicitly wants a coding agent run queued.',
     '- The title should describe the automation, not say "New automation".',
     '- Keep the prompt durable enough for a future scheduled runner to execute.',
     '',
@@ -1735,14 +1685,10 @@ function parseAutomationSetupResult(raw) {
 
   const status = parsed.status === 'configured' ? 'configured' : 'needs_more_info';
   const prompt = typeof parsed.prompt === 'string' ? parsed.prompt : '';
-  if (!['report_only', 'monitor_context', 'queue_agent'].includes(parsed.taskType)) {
-    throw new Error('Codex returned invalid automation setup JSON: taskType must be report_only, monitor_context, or queue_agent.');
-  }
   return {
     status,
     title: typeof parsed.title === 'string' ? parsed.title.slice(0, 120) : 'Scheduled automation',
     prompt,
-    taskType: parsed.taskType,
     cronExpression: typeof parsed.cronExpression === 'string' ? parsed.cronExpression : null,
     scheduleLabel: typeof parsed.scheduleLabel === 'string' ? parsed.scheduleLabel : null,
     scheduleType: typeof parsed.scheduleType === 'string' ? parsed.scheduleType : 'manual',

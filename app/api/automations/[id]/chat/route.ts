@@ -21,7 +21,6 @@ type AutomationSetupResult = {
   status?: 'configured' | 'needs_more_info';
   title?: string;
   prompt?: string;
-  taskType?: 'monitor_context' | 'queue_agent' | 'report_only';
   cronExpression?: string | null;
   runAt?: string | null;
   scheduleLabel?: string | null;
@@ -37,7 +36,6 @@ type AutomationSetupResult = {
 type AutomationRegistration = {
   title?: string;
   prompt?: string;
-  taskType?: 'monitor_context' | 'queue_agent' | 'report_only';
   cronExpression?: string | null;
   runAt?: string | null;
   scheduleLabel?: string | null;
@@ -308,7 +306,6 @@ function getRegistration(setup: AutomationSetupResult): AutomationRegistration |
     return {
       title: setup.title,
       prompt: setup.prompt,
-      taskType: setup.taskType,
       cronExpression: setup.cronExpression,
       runAt: setup.runAt,
       scheduleLabel: setup.scheduleLabel,
@@ -415,7 +412,6 @@ export async function POST(
   const invalidSchedule = Boolean(registration && !nextRunAt);
   const prompt = registration?.prompt?.trim() || setup.prompt?.trim() || text;
   const title = registration?.title?.trim() || setup.title?.trim() || task.title || 'Scheduled automation';
-  const taskType = registration?.taskType || setup.taskType || task.task_type || 'monitor_context';
   const updatedTask = canSetUp
     ? await updateScheduledAgentTask(
         id,
@@ -425,7 +421,6 @@ export async function POST(
           description: prompt,
           instructions: prompt,
           prompt,
-          taskType,
           status: 'active',
           scheduleType: registration?.runAt ? 'once' : registration?.scheduleType || 'cron',
           cronExpression: registration?.runAt ? null : registration?.cronExpression,

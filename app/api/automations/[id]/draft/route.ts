@@ -45,7 +45,6 @@ export async function POST(
     instructions: prompt,
     customerName: task.customer_name,
     customerEmail: task.customer_email,
-    taskType: task.task_type || 'monitor_context',
     featureKey: task.feature_key || null,
     scheduleType: 'cron' as const,
     cronExpression: task.cron_expression || '0 8 * * 1-5',

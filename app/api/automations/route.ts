@@ -40,7 +40,6 @@ export async function POST(request: NextRequest) {
     prompt?: string;
     customer_name?: string;
     customer_email?: string;
-    task_type?: 'monitor_context' | 'queue_agent' | 'report_only';
     feature_key?: string;
     schedule?: string;
     schedule_label?: string;
@@ -77,7 +76,6 @@ export async function POST(request: NextRequest) {
       customerName: company.name,
       customerEmail: requesterEmail,
       companyAccountId: company.id,
-      taskType: body.task_type ?? 'monitor_context',
       featureKey: body.feature_key ?? null,
       scheduleType: body.cron_expression ? 'cron' : 'manual',
       cronExpression: body.cron_expression ?? null,
