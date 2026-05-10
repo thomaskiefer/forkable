@@ -660,18 +660,28 @@ async function processScheduledTask(task, options = {}) {
       taskId: task.id,
       executionId: execution.id,
     }));
+    await createScheduledTaskChatMessage(task, execution, formatScheduledTaskChatResult({
+      evaluation,
+      result,
+      created,
+    })).catch((messageError) => logError(messageError, {
+      source: 'scheduled-task-chat-message',
+      taskId: task.id,
+      executionId: execution.id,
+    }));
     await finalizeOneShotTask(task);
   } catch (error) {
+    const errorMessage = formatError(error);
     await updateScheduledExecution(execution.id, {
       status: 'failed',
       finished_at: new Date().toISOString(),
-      error_message: trimForDb(formatError(error)),
-      error: trimForDb(formatError(error)),
+      error_message: trimForDb(errorMessage),
+      error: trimForDb(errorMessage),
       updated_at: new Date().toISOString(),
     });
     await createNotification({
       title: `${task.title || 'Scheduled automation'} failed`,
-      body: trimForDb(formatError(error)),
+      body: trimForDb(errorMessage),
       kind: 'error',
       source_type: 'scheduled_agent',
       action_label: 'Open automation',
@@ -686,6 +696,11 @@ async function processScheduledTask(task, options = {}) {
     }).catch((notificationError) => logError(notificationError, {
       source: 'scheduled-task-notification',
       taskId: task.id,
+    }));
+    await createScheduledTaskChatMessage(task, execution, `Run failed: ${errorMessage}`).catch((messageError) => logError(messageError, {
+      source: 'scheduled-task-chat-message',
+      taskId: task.id,
+      executionId: execution.id,
     }));
     await finalizeOneShotTask(task).catch((finalizeError) => logError(finalizeError, {
       source: 'scheduled-task-finalize-once',
@@ -797,6 +812,55 @@ async function createScheduledTaskNotification(task, execution, details) {
   });
 }
 
+function formatScheduledTaskChatResult({ evaluation, result, created }) {
+  if (created) {
+    return [
+      result.reason,
+      '',
+      `Queued run ${created.run.id}.`,
+    ].join('\n');
+  }
+  return result.reason || evaluation.summary || 'Automation ran.';
+}
+
+async function createScheduledTaskChatMessage(task, execution, content) {
+  const text = trimForDb(content).trim();
+  if (!text) return null;
+
+  const { data: latestRows, error: latestError } = await insforge.database
+    .from('scheduled_agent_messages')
+    .select('sort_order')
+    .eq('task_id', task.id)
+    .order('sort_order', { ascending: false })
+    .range(0, 0);
+
+  assertDb(latestError, 'Unable to prepare scheduled agent chat message.');
+
+  const latestSort = latestRows?.[0]
+    ? Number(latestRows[0].sort_order ?? -1)
+    : -1;
+
+  const { data, error } = await insforge.database
+    .from('scheduled_agent_messages')
+    .insert([{
+      task_id: task.id,
+      role: 'assistant',
+      content: text,
+      sort_order: latestSort + 1,
+      metadata: {
+        source: 'scheduled_execution',
+        runner_id: runnerId,
+        execution_id: execution.id,
+        status: execution.status || 'running',
+      },
+      user_id: task.user_id,
+    }])
+    .select('*');
+
+  assertDb(error, 'Unable to create scheduled agent chat message.');
+  return data?.[0] || null;
+}
+
 async function evaluateScheduledTask(task) {
   if (task.task_type === 'report_only') {
     return buildReportOnlyScheduledEvaluation(task);
@@ -820,7 +884,7 @@ async function evaluateScheduledTask(task) {
 
 function buildReportOnlyScheduledEvaluation(task) {
   const prompt = String(task.prompt || task.instructions || task.description || '').trim();
-  const echo = prompt.match(/^echo\s+(.+)$/i);
+  const echo = prompt.match(/^echo(?:\s+the\s+message:?)?\s+(.+)$/i);
   const summary = echo ? echo[1].trim() : prompt || 'Scheduled automation ran.';
   return {
     summary,
