@@ -31,6 +31,10 @@ function notifyUnreadCountChanged() {
   globalThis.dispatchEvent(new Event('notifications:changed'));
 }
 
+function notificationApiUrl() {
+  return `/api/notifications?t=${Date.now()}`;
+}
+
 export function NotificationsList({ initialNotifications }: { initialNotifications: UserNotification[] }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -43,7 +47,7 @@ export function NotificationsList({ initialNotifications }: { initialNotificatio
 
     async function refreshNotifications() {
       try {
-        const response = await fetch('/api/notifications', { cache: 'no-store' });
+        const response = await fetch(notificationApiUrl(), { cache: 'no-store' });
         if (!response.ok) return;
         const body = (await response.json()) as { notifications?: UserNotification[] };
         if (!cancelled) {

@@ -32,6 +32,10 @@ const navItems = [
   { href: '/notifications', label: 'Notifications', icon: Bell },
 ];
 
+function unreadCountApiUrl() {
+  return `/api/notifications/unread-count?t=${Date.now()}`;
+}
+
 function matchesRoute(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
@@ -54,7 +58,7 @@ export function Sidebar() {
 
     async function loadUnreadNotifications() {
       try {
-        const response = await fetch('/api/notifications/unread-count', {
+        const response = await fetch(unreadCountApiUrl(), {
           cache: 'no-store',
         });
         if (!response.ok) return;
