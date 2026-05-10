@@ -95,9 +95,31 @@ export async function getClients(
   sortDirection?: string | null,
 ) {
   const insforge = getInsforge(accessToken);
-  const sort = sortField
-    ? normalizeClientSort(sortField, sortDirection)
-    : { field: 'company_name' as ClientSortField, direction: 'asc' as SortDirection };
+  if (sortField) {
+    const sort = normalizeClientSort(sortField, sortDirection);
+    const offset = page !== undefined && itemsPerPage !== undefined
+      ? (page - 1) * itemsPerPage
+      : 0;
+    const limit = itemsPerPage ?? null;
+    const [{ data, error }, countResult] = await Promise.all([
+      insforge.database.rpc('get_sorted_clients', {
+        p_sort_field: sort.field,
+        p_sort_direction: sort.direction,
+        p_limit: limit,
+        p_offset: offset,
+      }),
+      insforge.database
+        .from('clients')
+        .select('id', { count: 'exact' })
+        .eq('is_deleted', false),
+    ]);
+
+    assertNoDatabaseError(error, 'Unable to load clients.');
+    assertNoDatabaseError(countResult.error, 'Unable to count clients.');
+    return { clients: data ?? [], count: countResult.count ?? 0 };
+  }
+
+  const sort = { field: 'company_name' as ClientSortField, direction: 'asc' as SortDirection };
   let query = insforge.database
     .from('clients')
     .select('*', { count: 'exact' })
