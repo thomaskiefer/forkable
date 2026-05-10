@@ -43,6 +43,8 @@ type AutomationRegistration = {
   timezone?: string;
 };
 
+type IntervalUnit = 'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'year';
+
 function getRunnerConfig() {
   const runnerUrl = normalizeRunnerUrl(process.env.FORKABLE_AGENT_RUNNER_URL);
   const webhookSecret = process.env.FORKABLE_RUNNER_WEBHOOK_SECRET;
@@ -121,6 +123,9 @@ function zonedTimeToUtc(
 }
 
 function nextRunFromCronInTimezone(cronExpression?: string | null, timezone = 'America/Los_Angeles') {
+  const intervalNextRun = nextRunFromIntervalExpression(cronExpression);
+  if (intervalNextRun) return intervalNextRun;
+
   const everyMinutes = cronExpression?.trim().match(/^\*\/(\d+) \* \* \* \*$/);
   if (everyMinutes) {
     const interval = Math.max(1, Number(everyMinutes[1]));
@@ -203,6 +208,60 @@ function parseCronExpression(cronExpression?: string | null) {
   return { minute, hour, dayOfMonth, weekdays };
 }
 
+function normalizeIntervalUnit(unit: string): IntervalUnit | null {
+  const value = unit.trim().toLowerCase();
+  if (/^(s|sec|secs|second|seconds)$/.test(value)) return 'second';
+  if (/^(m|min|mins|minute|minutes)$/.test(value)) return 'minute';
+  if (/^(h|hr|hrs|hour|hours)$/.test(value)) return 'hour';
+  if (/^(d|day|days)$/.test(value)) return 'day';
+  if (/^(w|wk|wks|week|weeks)$/.test(value)) return 'week';
+  if (/^(mo|mon|mons|month|months)$/.test(value)) return 'month';
+  if (/^(y|yr|yrs|year|years)$/.test(value)) return 'year';
+  return null;
+}
+
+function addInterval(date: Date, amount: number, unit: IntervalUnit) {
+  const next = new Date(date);
+  if (unit === 'second') next.setSeconds(next.getSeconds() + amount);
+  if (unit === 'minute') next.setMinutes(next.getMinutes() + amount);
+  if (unit === 'hour') next.setHours(next.getHours() + amount);
+  if (unit === 'day') next.setDate(next.getDate() + amount);
+  if (unit === 'week') next.setDate(next.getDate() + amount * 7);
+  if (unit === 'month') next.setMonth(next.getMonth() + amount);
+  if (unit === 'year') next.setFullYear(next.getFullYear() + amount);
+  return next;
+}
+
+function parseIntervalExpression(value?: string | null) {
+  const text = value?.trim();
+  if (!text) return null;
+
+  const encoded = text.match(/^interval:(\d+):(second|minute|hour|day|week|month|year)s?$/i);
+  if (encoded) {
+    return { amount: Number(encoded[1]), unit: encoded[2].toLowerCase() as IntervalUnit };
+  }
+
+  const natural = text.match(/\bevery\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mon|mons|month|months|y|yr|yrs|year|years)\b/i);
+  if (!natural?.[1] || !natural[2]) return null;
+  const unit = normalizeIntervalUnit(natural[2]);
+  if (!unit) return null;
+  return { amount: Number(natural[1]), unit };
+}
+
+function nextRunFromIntervalExpression(value?: string | null) {
+  const interval = parseIntervalExpression(value);
+  if (!interval || !Number.isInteger(interval.amount) || interval.amount <= 0) return null;
+  return addInterval(new Date(), interval.amount, interval.unit).toISOString();
+}
+
+function intervalExpression(amount: number, unit: IntervalUnit) {
+  return `interval:${amount}:${unit}`;
+}
+
+function intervalLabel(amount: number, unit: IntervalUnit) {
+  return `Every ${amount} ${unit}${amount === 1 ? '' : 's'}`;
+}
+
 function futureRunAt(value?: string | null) {
   if (!value) return null;
   const date = new Date(value);
@@ -211,11 +270,11 @@ function futureRunAt(value?: string | null) {
 }
 
 function hasRelativeTime(value: string) {
-  return /\bin\s+\d{1,4}\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/i.test(value);
+  return /\bin\s+\d{1,4}\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mon|mons|month|months|y|yr|yrs|year|years)\b/i.test(value);
 }
 
 function isOnlyRelativeTime(value: string) {
-  return /^\s*in\s+\d{1,4}\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s*$/i.test(value);
+  return /^\s*in\s+\d{1,4}\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mon|mons|month|months|y|yr|yrs|year|years)\s*$/i.test(value);
 }
 
 function isOnceConfirmation(value: string) {
@@ -223,28 +282,47 @@ function isOnceConfirmation(value: string) {
 }
 
 function relativeTimeMatch(value: string) {
-  return value.match(/\bin\s+(\d{1,4})\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/i);
-}
-
-function relativeUnitMs(unit: string) {
-  const normalized = unit.toLowerCase();
-  if (normalized.startsWith('hour') || ['h', 'hr', 'hrs'].includes(normalized)) return 60 * 60 * 1000;
-  if (normalized.startsWith('day') || normalized === 'd') return 24 * 60 * 60 * 1000;
-  return 60 * 1000;
-}
-
-function relativeUnitLabel(unitMs: number) {
-  if (unitMs === 60 * 60 * 1000) return 'hour';
-  if (unitMs === 24 * 60 * 60 * 1000) return 'day';
-  return 'minute';
+  return value.match(/\bin\s+(\d{1,4})\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mon|mons|month|months|y|yr|yrs|year|years)\b/i);
 }
 
 function cleanPrompt(value: string) {
   return value
-    .replace(/\bin\s+\d{1,4}\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/ig, '')
+    .replace(/\bin\s+\d{1,4}\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mon|mons|month|months|y|yr|yrs|year|years)\b/ig, '')
+    .replace(/\bevery\s+\d{1,4}\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|mon|mons|month|months|y|yr|yrs|year|years)\b/ig, '')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/[,.!?;:]+$/g, '');
+}
+
+function repairIntervalRegistration(input: {
+  text: string;
+  history: ScheduledAgentMessage[];
+  registration: AutomationRegistration | null;
+}): AutomationRegistration | null {
+  const candidates = [
+    input.text,
+    input.registration?.cronExpression ?? '',
+    input.registration?.scheduleLabel ?? '',
+    ...input.history.filter((message) => message.role === 'user').map((message) => message.content).reverse(),
+  ];
+  const interval = candidates.map(parseIntervalExpression).find(Boolean);
+  if (!interval || !Number.isInteger(interval.amount) || interval.amount <= 0) return null;
+
+  const prompt = cleanPrompt(input.text) ||
+    input.registration?.prompt?.trim() ||
+    inferPromptFromHistory(input.history);
+  if (!prompt) return null;
+
+  return {
+    ...input.registration,
+    title: input.registration?.title?.trim() || (/slack/i.test(prompt) ? 'Slack summary' : prompt.slice(0, 80)),
+    prompt,
+    cronExpression: intervalExpression(interval.amount, interval.unit),
+    runAt: null,
+    scheduleLabel: intervalLabel(interval.amount, interval.unit),
+    scheduleType: 'cron',
+    timezone: input.registration?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Los_Angeles',
+  };
 }
 
 function inferPromptFromHistory(history: ScheduledAgentMessage[]) {
@@ -270,9 +348,10 @@ function repairRelativeOneShotRegistration(input: {
   const amount = Number(match[1]);
   if (!Number.isFinite(amount) || amount <= 0) return null;
 
-  const unitMs = relativeUnitMs(match[2]);
-  const unitLabel = relativeUnitLabel(unitMs);
-  const label = `${amount} ${unitLabel}${amount === 1 ? '' : 's'}`;
+  const unit = normalizeIntervalUnit(match[2]);
+  if (!unit) return null;
+
+  const label = `${amount} ${unit}${amount === 1 ? '' : 's'}`;
   const prompt = cleanPrompt(latestWithRelativeTime) ||
     input.registration?.prompt?.trim() ||
     inferPromptFromHistory(input.history);
@@ -286,7 +365,7 @@ function repairRelativeOneShotRegistration(input: {
     title,
     prompt,
     cronExpression: null,
-    runAt: new Date(Date.now() + amount * unitMs).toISOString(),
+    runAt: addInterval(new Date(), amount, unit).toISOString(),
     scheduleLabel: `Once in ${label}`,
     scheduleType: 'once',
     timezone: input.registration?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Los_Angeles',
@@ -398,9 +477,10 @@ export async function POST(
   }
 
   const rawRegistration = getRegistration(setup);
-  const registration = rawRegistration && !futureRunAt(rawRegistration.runAt) && !rawRegistration.cronExpression
-    ? repairRelativeOneShotRegistration({ text, history, registration: rawRegistration }) ?? rawRegistration
-    : rawRegistration;
+  const registration = repairIntervalRegistration({ text, history, registration: rawRegistration }) ??
+    (rawRegistration && !futureRunAt(rawRegistration.runAt) && !rawRegistration.cronExpression
+      ? repairRelativeOneShotRegistration({ text, history, registration: rawRegistration }) ?? rawRegistration
+      : rawRegistration);
   const nextRunAt = registration
     ? futureRunAt(registration.runAt) ??
       nextRunFromCronInTimezone(
@@ -468,9 +548,9 @@ export async function POST(
         'assistant',
           canSetUp
           ? setup.assistantMessage ||
-              `Set up and activated. I will run this automation ${setup.scheduleLabel?.toLowerCase()}.`
+              `Set up and activated. I will run this automation ${(registration?.scheduleLabel || setup.scheduleLabel || 'on schedule').toLowerCase()}.`
           : invalidSchedule
-            ? 'I could not activate that schedule. Use a daily, weekday, weekly, monthly day-of-month, or every-N-minutes schedule.'
+            ? 'I could not activate that schedule. Use a daily, weekday, weekly, monthly day-of-month, or every-N interval such as every 10 seconds, every 2 hours, every 3 weeks, or every 6 months.'
           : setup.assistantMessage ||
               'I have the task. Tell me when it should run, for example: "every day at 3:23 PM PT."',
       ),

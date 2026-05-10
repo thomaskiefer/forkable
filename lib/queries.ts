@@ -33,7 +33,7 @@ const CLIENT_SORT_COLUMNS: Record<ClientSortField, string> = {
 export function normalizeClientSort(
   sortField?: string | null,
   sortDirection?: string | null,
-) {
+): { field: ClientSortField; direction: SortDirection } {
   const field = (
     sortField === 'company_name' ||
     sortField === 'deal_value' ||

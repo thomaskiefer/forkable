@@ -83,7 +83,32 @@ function daysInMonth(year: number, month: number) {
   return new Date(Date.UTC(year, month, 0)).getUTCDate();
 }
 
+type IntervalUnit = 'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'year';
+
+function addInterval(date: Date, amount: number, unit: IntervalUnit) {
+  const next = new Date(date);
+  if (unit === 'second') next.setSeconds(next.getSeconds() + amount);
+  if (unit === 'minute') next.setMinutes(next.getMinutes() + amount);
+  if (unit === 'hour') next.setHours(next.getHours() + amount);
+  if (unit === 'day') next.setDate(next.getDate() + amount);
+  if (unit === 'week') next.setDate(next.getDate() + amount * 7);
+  if (unit === 'month') next.setMonth(next.getMonth() + amount);
+  if (unit === 'year') next.setFullYear(next.getFullYear() + amount);
+  return next;
+}
+
+function nextRunFromIntervalExpression(value?: string | null) {
+  const match = value?.trim().match(/^interval:(\d+):(second|minute|hour|day|week|month|year)s?$/i);
+  if (!match?.[1] || !match[2]) return null;
+  const amount = Number(match[1]);
+  if (!Number.isInteger(amount) || amount <= 0) return null;
+  return addInterval(new Date(), amount, match[2].toLowerCase() as IntervalUnit).toISOString();
+}
+
 function nextRunFromCron(cronExpression?: string | null, timezone = 'America/Los_Angeles') {
+  const intervalNextRun = nextRunFromIntervalExpression(cronExpression);
+  if (intervalNextRun) return intervalNextRun;
+
   const everyMinutes = cronExpression?.trim().match(/^\*\/(\d+) \* \* \* \*$/);
   if (everyMinutes) {
     return new Date(Date.now() + Math.max(1, Number(everyMinutes[1])) * 60 * 1000).toISOString();

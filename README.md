@@ -170,6 +170,17 @@ Index the product repo in Nia and provide the runner with:
 NIA_API_KEY=your-nia-api-key
 ```
 
+If Slack context is installed in Nia locally, the same `NIA_API_KEY` must belong
+to that Nia account/org. To mirror the local CLI config exactly, seed:
+
+```bash
+base64 -i ~/.config/nia/config.json | tr -d '\n'
+```
+
+as `NIA_CONFIG_JSON_B64`. After deploy, `/health` reports
+`niaSlackReady: true` and the number of Slack installations when Compute can see
+the Slack context.
+
 If customer context lives in Hyperspell, also provide:
 
 ```bash

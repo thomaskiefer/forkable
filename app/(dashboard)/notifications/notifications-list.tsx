@@ -60,6 +60,7 @@ export function NotificationsList({ initialNotifications }: { initialNotificatio
       }
     }
 
+    void refreshNotifications();
     const intervalId = globalThis.setInterval(refreshNotifications, 5000);
     globalThis.addEventListener('focus', refreshWhenVisible);
     document.addEventListener('visibilitychange', refreshWhenVisible);

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Bell,
   CalendarClock,
@@ -47,6 +47,7 @@ export function Sidebar() {
   const router = useRouter();
   const activeHref = getActiveHref(pathname);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const lastUnreadNotificationsRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +59,15 @@ export function Sidebar() {
         });
         if (!response.ok) return;
         const body = (await response.json()) as { count?: number };
-        if (!cancelled) setUnreadNotifications(Math.max(0, body.count ?? 0));
+        const nextCount = Math.max(0, body.count ?? 0);
+        if (!cancelled) {
+          const previousCount = lastUnreadNotificationsRef.current;
+          lastUnreadNotificationsRef.current = nextCount;
+          setUnreadNotifications(nextCount);
+          if (previousCount !== null && previousCount !== nextCount) {
+            globalThis.dispatchEvent(new Event('notifications:changed'));
+          }
+        }
       } catch {
         if (!cancelled) setUnreadNotifications(0);
       }

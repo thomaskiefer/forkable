@@ -1403,6 +1403,11 @@ function calculateNextRunAt(task, fromDate = new Date()) {
   if (scheduleType === 'manual' || scheduleType === 'once') return null;
   if (!cron) return null;
 
+  const interval = cron.match(/^interval:(\d+):(second|minute|hour|day|week|month|year)s?$/i);
+  if (interval) {
+    return addInterval(fromDate, Number(interval[1]), interval[2]);
+  }
+
   const everyMinutes = cron.match(/^\*\/(\d+) \* \* \* \*$/);
   if (everyMinutes) {
     return new Date(fromDate.getTime() + Math.max(1, Number(everyMinutes[1])) * 60 * 1000);
@@ -1419,6 +1424,20 @@ function calculateNextRunAt(task, fromDate = new Date()) {
   }
 
   return null;
+}
+
+function addInterval(fromDate, amount, unit) {
+  const next = new Date(fromDate);
+  const count = Math.max(1, Number(amount));
+  const normalized = String(unit || '').toLowerCase();
+  if (normalized === 'second') next.setSeconds(next.getSeconds() + count);
+  if (normalized === 'minute') next.setMinutes(next.getMinutes() + count);
+  if (normalized === 'hour') next.setHours(next.getHours() + count);
+  if (normalized === 'day') next.setDate(next.getDate() + count);
+  if (normalized === 'week') next.setDate(next.getDate() + count * 7);
+  if (normalized === 'month') next.setMonth(next.getMonth() + count);
+  if (normalized === 'year') next.setFullYear(next.getFullYear() + count);
+  return next;
 }
 
 function nextDailyRun(minute, hour, fromDate) {
@@ -1874,7 +1893,7 @@ function buildAutomationSetupPrompt(body) {
       status: 'configured | needs_more_info',
       title: 'short automation title',
       prompt: 'the durable automation instructions',
-      cronExpression: 'cron in minute hour * * * form, or null',
+      cronExpression: 'cron in minute hour * * * form, interval:<number>:<unit> for every-N recurring schedules, or null',
       scheduleLabel: 'human-readable schedule, or null',
       scheduleType: 'daily | weekly | monthly | cron | manual',
       timezone: 'IANA timezone, default America/Los_Angeles when PT/Pacific is mentioned',
@@ -1886,6 +1905,7 @@ function buildAutomationSetupPrompt(body) {
     '- If timing is missing or ambiguous, set status to needs_more_info and ask one concise question.',
     '- For "every day at 3:23 pm PT", use cronExpression "23 15 * * *", scheduleType "daily", timezone "America/Los_Angeles".',
     '- For weekdays, use cronExpression with day-of-week 1-5.',
+    '- For "every N seconds/minutes/hours/days/weeks/months/years", use cronExpression "interval:N:unit" and scheduleType "cron".',
     '- The title should describe the automation, not say "New automation".',
     '- Keep the prompt durable enough for a future scheduled runner to execute.',
     '',
