@@ -195,13 +195,16 @@ export default async function ClientsPage() {
         />
       ) : (
         <>
-        <section className="grid gap-px overflow-hidden rounded-2xl border bg-border sm:grid-cols-3">
+        <section className="flex flex-wrap gap-3">
           {[
             { label: 'Book of business', value: currency.format(contractValue), icon: Users },
             { label: 'Open projects', value: openProjectCount, icon: BriefcaseBusiness },
             { label: 'Open requests', value: openRequestCount, icon: GitPullRequestArrow },
           ].map((stat) => (
-            <div key={stat.label} className="flex items-start justify-between gap-4 bg-card p-5">
+            <div
+              key={stat.label}
+              className="inline-flex items-start gap-6 rounded-xl border bg-card px-5 py-4"
+            >
               <div className="space-y-1">
                 <p className="eyebrow">{stat.label}</p>
                 <p className="font-display nums-tabular text-3xl font-medium tabular-nums">
