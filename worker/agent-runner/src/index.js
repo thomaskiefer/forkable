@@ -46,6 +46,9 @@ const config = {
   skipVerification: process.env.FORKABLE_SKIP_VERIFICATION !== 'false',
   checks: parseCommandList(process.env.FORKABLE_CHECK_COMMANDS || ''),
 };
+const staleScheduledExecutionMs = Number(
+  process.env.FORKABLE_STALE_SCHEDULED_EXECUTION_MS || 10 * 60 * 1000,
+);
 
 const insforge = createClient({
   baseUrl: config.insforgeUrl,
@@ -445,6 +448,7 @@ async function claimQueuedRunById(runId) {
 }
 
 async function processScheduledTasksTick() {
+  await reconcileStaleScheduledExecutions();
   const tasks = await claimDueScheduledTasks();
   for (const task of tasks) {
     await processScheduledTask(task);
@@ -471,13 +475,10 @@ async function claimDueScheduledTasks() {
   const claimed = [];
   for (const task of data || []) {
     const nextRunAt = calculateNextRunAt(task, now);
+    const taskPatch = buildScheduledTaskClaimPatch(task, now, nextRunAt);
     const { data: rows, error: claimError } = await insforge.database
       .from('scheduled_agent_tasks')
-      .update({
-        last_run_at: now.toISOString(),
-        next_run_at: nextRunAt ? nextRunAt.toISOString() : null,
-        updated_at: now.toISOString(),
-      })
+      .update(taskPatch)
       .eq('id', task.id)
       .eq('status', 'active')
       .eq('next_run_at', task.next_run_at)
@@ -501,16 +502,14 @@ async function claimScheduledTaskById(taskId) {
 
   assertDb(error, 'Unable to load scheduled agent task.');
   if (!task) return null;
+  await reconcileStaleScheduledExecutions(task.id);
   if (await hasRunningScheduledExecution(task.id)) return null;
 
   const nextRunAt = calculateNextRunAt(task, now);
+  const taskPatch = buildScheduledTaskClaimPatch(task, now, nextRunAt);
   let claimQuery = insforge.database
     .from('scheduled_agent_tasks')
-    .update({
-      last_run_at: now.toISOString(),
-      next_run_at: nextRunAt ? nextRunAt.toISOString() : null,
-      updated_at: now.toISOString(),
-    })
+    .update(taskPatch)
     .eq('id', task.id)
     .eq('status', 'active')
     .eq('updated_at', task.updated_at);
@@ -523,6 +522,98 @@ async function claimScheduledTaskById(taskId) {
 
   assertDb(claimError, 'Unable to claim scheduled agent task.');
   return rows?.[0] ? { ...rows[0], claimed_run_at: now.toISOString() } : null;
+}
+
+function isOneShotTask(task) {
+  return String(task.schedule_type || '').toLowerCase() === 'once';
+}
+
+function buildScheduledTaskClaimPatch(task, now, nextRunAt) {
+  return {
+    last_run_at: now.toISOString(),
+    next_run_at: nextRunAt ? nextRunAt.toISOString() : null,
+    updated_at: now.toISOString(),
+    metadata: {
+      ...(task.metadata || {}),
+      last_claimed_by: runnerId,
+      last_claimed_at: now.toISOString(),
+    },
+  };
+}
+
+async function finalizeOneShotTask(task, status = 'paused') {
+  if (!isOneShotTask(task)) return;
+
+  const now = new Date().toISOString();
+  const { error } = await insforge.database
+    .from('scheduled_agent_tasks')
+    .update({
+      status,
+      next_run_at: null,
+      paused_at: now,
+      updated_at: now,
+      metadata: {
+        ...(task.metadata || {}),
+        completed_once_at: now,
+        completed_once_by: runnerId,
+      },
+    })
+    .eq('id', task.id);
+
+  assertDb(error, 'Unable to finalize one-shot scheduled agent task.');
+}
+
+async function reconcileStaleScheduledExecutions(taskId = null) {
+  const cutoff = new Date(Date.now() - staleScheduledExecutionMs).toISOString();
+  let query = insforge.database
+    .from('scheduled_agent_executions')
+    .select('*')
+    .eq('status', 'running')
+    .lt('started_at', cutoff)
+    .neq('runner_id', runnerId)
+    .range(0, Number(process.env.FORKABLE_STALE_SCHEDULED_EXECUTION_LIMIT || 10) - 1);
+
+  if (taskId) query = query.eq('task_id', taskId);
+
+  const { data, error } = await query;
+  assertDb(error, 'Unable to query stale scheduled agent executions.');
+
+  for (const execution of data || []) {
+    const now = new Date().toISOString();
+    const message = `Execution was claimed by ${execution.runner_id || 'unknown runner'} and became stale before completion.`;
+    const { error: updateError } = await insforge.database
+      .from('scheduled_agent_executions')
+      .update({
+        status: 'failed',
+        finished_at: now,
+        error_message: trimForDb(message),
+        error: trimForDb(message),
+        updated_at: now,
+      })
+      .eq('id', execution.id)
+      .eq('status', 'running');
+
+    assertDb(updateError, 'Unable to mark stale scheduled agent execution failed.');
+    await finalizeStaleOneShotTask(execution.task_id).catch((finalizeError) => logError(finalizeError, {
+      source: 'scheduled-task-stale-finalize-once',
+      taskId: execution.task_id,
+      executionId: execution.id,
+    }));
+  }
+}
+
+async function finalizeStaleOneShotTask(taskId) {
+  if (!taskId) return;
+
+  const { data: task, error } = await insforge.database
+    .from('scheduled_agent_tasks')
+    .select('*')
+    .eq('id', taskId)
+    .maybeSingle();
+
+  assertDb(error, 'Unable to load stale one-shot scheduled agent task.');
+  if (!task || !isOneShotTask(task)) return;
+  await finalizeOneShotTask(task);
 }
 
 async function hasRunningScheduledExecution(taskId) {
@@ -569,6 +660,7 @@ async function processScheduledTask(task, options = {}) {
       taskId: task.id,
       executionId: execution.id,
     }));
+    await finalizeOneShotTask(task);
   } catch (error) {
     await updateScheduledExecution(execution.id, {
       status: 'failed',
@@ -593,6 +685,10 @@ async function processScheduledTask(task, options = {}) {
       user_id: task.user_id,
     }).catch((notificationError) => logError(notificationError, {
       source: 'scheduled-task-notification',
+      taskId: task.id,
+    }));
+    await finalizeOneShotTask(task).catch((finalizeError) => logError(finalizeError, {
+      source: 'scheduled-task-finalize-once',
       taskId: task.id,
     }));
     throw error;
@@ -702,6 +798,10 @@ async function createScheduledTaskNotification(task, execution, details) {
 }
 
 async function evaluateScheduledTask(task) {
+  if (task.task_type === 'report_only') {
+    return buildReportOnlyScheduledEvaluation(task);
+  }
+
   const fallback = buildScheduledEvaluationFallback(task);
   if (getCodexAuthMode() === 'none') return fallback;
 
@@ -716,6 +816,17 @@ async function evaluateScheduledTask(task) {
     logError(error, { source: 'scheduled-task-evaluation', taskId: task.id });
     return fallback;
   }
+}
+
+function buildReportOnlyScheduledEvaluation(task) {
+  const prompt = String(task.prompt || task.instructions || task.description || '').trim();
+  const echo = prompt.match(/^echo\s+(.+)$/i);
+  const summary = echo ? echo[1].trim() : prompt || 'Scheduled automation ran.';
+  return {
+    summary,
+    raw: null,
+    warranted: false,
+  };
 }
 
 function inferWorkWarranted(content, task) {
@@ -955,7 +1066,9 @@ async function createAgentStepsForScheduledRun(run, planSnapshot, branchPart, us
 
 function calculateNextRunAt(task, fromDate = new Date()) {
   const cron = String(task.cron || task.cron_expression || task.schedule || '').trim();
-  if (!cron && task.schedule_type === 'manual') return null;
+  const scheduleType = String(task.schedule_type || '').toLowerCase();
+  if (scheduleType === 'manual' || scheduleType === 'once') return null;
+  if (!cron) return null;
 
   const everyMinutes = cron.match(/^\*\/(\d+) \* \* \* \*$/);
   if (everyMinutes) {
@@ -972,7 +1085,7 @@ function calculateNextRunAt(task, fromDate = new Date()) {
     return nextWeekdayRun(Number(weekdays[1]), Number(weekdays[2]), fromDate);
   }
 
-  return new Date(fromDate.getTime() + 24 * 60 * 60 * 1000);
+  return null;
 }
 
 function nextDailyRun(minute, hour, fromDate) {
@@ -1400,6 +1513,7 @@ function buildAutomationSetupPrompt(body) {
       status: 'configured | needs_more_info',
       title: 'short automation title',
       prompt: 'the durable automation instructions',
+      taskType: 'report_only | monitor_context | queue_agent',
       cronExpression: 'cron in minute hour * * * form, or null',
       scheduleLabel: 'human-readable schedule, or null',
       scheduleType: 'daily | weekly | monthly | cron | manual',
@@ -1412,6 +1526,9 @@ function buildAutomationSetupPrompt(body) {
     '- If timing is missing or ambiguous, set status to needs_more_info and ask one concise question.',
     '- For "every day at 3:23 pm PT", use cronExpression "23 15 * * *", scheduleType "daily", timezone "America/Los_Angeles".',
     '- For weekdays, use cronExpression with day-of-week 1-5.',
+    '- Use taskType "report_only" for reminders, echo requests, status notes, or simple one-shot messages that do not need code changes.',
+    '- Use taskType "monitor_context" for watch/check/monitor requests that may require customer or repo context before deciding what to do.',
+    '- Use taskType "queue_agent" only when the user explicitly wants a coding agent run queued.',
     '- The title should describe the automation, not say "New automation".',
     '- Keep the prompt durable enough for a future scheduled runner to execute.',
     '',
@@ -1451,16 +1568,28 @@ function parseAutomationSetupResult(raw) {
   }
 
   const status = parsed.status === 'configured' ? 'configured' : 'needs_more_info';
+  const prompt = typeof parsed.prompt === 'string' ? parsed.prompt : '';
   return {
     status,
     title: typeof parsed.title === 'string' ? parsed.title.slice(0, 120) : 'Scheduled automation',
-    prompt: typeof parsed.prompt === 'string' ? parsed.prompt : '',
+    prompt,
+    taskType: ['report_only', 'monitor_context', 'queue_agent'].includes(parsed.taskType)
+      ? parsed.taskType
+      : inferAutomationTaskType(prompt),
     cronExpression: typeof parsed.cronExpression === 'string' ? parsed.cronExpression : null,
     scheduleLabel: typeof parsed.scheduleLabel === 'string' ? parsed.scheduleLabel : null,
     scheduleType: typeof parsed.scheduleType === 'string' ? parsed.scheduleType : 'manual',
     timezone: typeof parsed.timezone === 'string' ? parsed.timezone : 'America/Los_Angeles',
     assistantMessage: typeof parsed.assistantMessage === 'string' ? parsed.assistantMessage : '',
   };
+}
+
+function inferAutomationTaskType(prompt) {
+  const text = String(prompt || '').trim().toLowerCase();
+  if (!text) return 'monitor_context';
+  if (/^(echo|say|tell me|remind me|notify me|send me)\b/.test(text)) return 'report_only';
+  if (/\b(run codex|coding agent|build|implement|fix|change code|deploy)\b/.test(text)) return 'queue_agent';
+  return 'monitor_context';
 }
 
 function createCodexPlanningEventHandler({ onDelta, onStatus }) {
