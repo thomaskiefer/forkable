@@ -20,6 +20,31 @@ import type {
 } from '@/lib/types';
 
 type InsforgeClient = ReturnType<typeof createInsforgeServerClient>;
+export type ClientSortField = 'company_name' | 'deal_value' | 'last_activity' | 'arr';
+export type SortDirection = 'asc' | 'desc';
+
+const CLIENT_SORT_COLUMNS: Record<ClientSortField, string> = {
+  company_name: 'name',
+  deal_value: 'updated_at',
+  last_activity: 'updated_at',
+  arr: 'updated_at',
+};
+
+export function normalizeClientSort(
+  sortField?: string | null,
+  sortDirection?: string | null,
+) {
+  const field = (
+    sortField === 'company_name' ||
+    sortField === 'deal_value' ||
+    sortField === 'last_activity' ||
+    sortField === 'arr'
+      ? sortField
+      : 'last_activity'
+  ) as ClientSortField;
+  const direction = sortDirection === 'asc' ? 'asc' : 'desc';
+  return { field, direction };
+}
 
 function getInsforge(accessToken?: string | null): InsforgeClient {
   if (accessToken) {
@@ -66,13 +91,18 @@ export async function getClients(
   accessToken?: string | null,
   page?: number,
   itemsPerPage?: number,
+  sortField?: string | null,
+  sortDirection?: string | null,
 ) {
   const insforge = getInsforge(accessToken);
+  const sort = sortField
+    ? normalizeClientSort(sortField, sortDirection)
+    : { field: 'company_name' as ClientSortField, direction: 'asc' as SortDirection };
   let query = insforge.database
     .from('clients')
     .select('*', { count: 'exact' })
     .eq('is_deleted', false)
-    .order('name', { ascending: true });
+    .order(CLIENT_SORT_COLUMNS[sort.field], { ascending: sort.direction === 'asc' });
 
   if (page !== undefined && itemsPerPage !== undefined) {
     const start = (page - 1) * itemsPerPage;
