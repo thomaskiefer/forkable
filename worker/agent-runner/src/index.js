@@ -124,6 +124,7 @@ function startHealthServer() {
         activeRunId: state.activeRunId,
         codexAuthMode: getCodexAuthMode(),
         insforgeCliAuthMode: getInsforgeCliAuthMode(),
+        niaMcpConfigured: Boolean(process.env.NIA_API_KEY),
         lastError: state.lastError,
         lastRunAt: state.lastRunAt,
         startedAt: state.startedAt,
