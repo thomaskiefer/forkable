@@ -2006,12 +2006,13 @@ async function recordTestResults(run, checks) {
 async function maybeDeployPreview(run, workspace) {
   if (!config.deployPreview) return null;
 
-  const deployDir = await prepareDeploymentDirectory(workspace, path.join(workspace, '..', 'preview-deploy-workdir'));
+  await rm(path.join(workspace, '.forkable'), { recursive: true, force: true });
+  await prepareInsforgeProjectLink(workspace);
   await execCommand(
     'npx',
     ['@insforge/cli', 'deployments', 'deploy', '.', '--json'],
     {
-      cwd: deployDir,
+      cwd: workspace,
       logPath: path.join(workspace, '..', 'preview-deploy.json'),
       env: insforgeCliEnv(),
       timeoutMs: 20 * 60 * 1000,
@@ -2094,12 +2095,13 @@ async function mergeFeatureBranch(run, workspace, runDir, commitSha) {
 async function maybeDeployProduction(workspace) {
   if (!config.deployProduction) return null;
 
-  const deployDir = await prepareDeploymentDirectory(workspace, path.join(workspace, '..', 'production-deploy-workdir'));
+  await rm(path.join(workspace, '.forkable'), { recursive: true, force: true });
+  await prepareInsforgeProjectLink(workspace);
   await execCommand(
     'npx',
     ['@insforge/cli', 'deployments', 'deploy', '.', '--json'],
     {
-      cwd: deployDir,
+      cwd: workspace,
       logPath: path.join(workspace, '..', 'production-deploy.json'),
       env: insforgeCliEnv(),
       timeoutMs: 20 * 60 * 1000,
@@ -2112,18 +2114,6 @@ async function maybeDeployProduction(workspace) {
     url: deployment?.url || deployment?.deploymentUrl || deployment?.app_url || null,
     id: deployment?.id || deployment?.deployment_id || null,
   };
-}
-
-async function prepareDeploymentDirectory(workspace, deployDir) {
-  await rm(deployDir, { recursive: true, force: true });
-  await mkdir(deployDir, { recursive: true });
-  await execShell(`git archive --format=tar HEAD | tar -x -C ${shellQuote(deployDir)}`, {
-    cwd: workspace,
-    logPath: path.join(deployDir, '..', 'git-archive-deploy.log'),
-    timeoutMs: 2 * 60 * 1000,
-  });
-  await prepareInsforgeProjectLink(deployDir);
-  return deployDir;
 }
 
 function resolveFeatureKey(run, context) {
@@ -2354,10 +2344,6 @@ async function createRunEvent(run, eventType, body, metadata = {}) {
 
   if (error && /agent_run_events/i.test(error.message || '')) return;
   assertDb(error, 'Unable to save Codex run output.');
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
 async function execShell(command, options = {}) {
