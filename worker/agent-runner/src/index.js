@@ -1480,49 +1480,14 @@ function createCodexPlanningEventHandler({ onDelta, onStatus }) {
 
 function extractCodexStatus(event) {
   const type = String(event?.method || event?.type || event?.msg?.type || '');
-  const item = event?.params?.item || event?.item || event?.msg?.item;
-  const itemType = String(item?.type || '');
-
-  if (itemType === 'command_execution') {
-    return formatCommandExecutionStatus(item, type);
-  }
-
-  if (itemType === 'mcp_tool_call') {
-    return formatMcpToolCallStatus(item);
-  }
-
   if (type === 'item/started' || type === 'item.started') {
+    const itemType = String(event?.params?.item?.type || event?.item?.type || '');
     if (itemType && !['agentMessage', 'agent_message'].includes(itemType)) return itemType;
   }
   if (type.includes('tool') || type.includes('exec') || type.includes('mcp')) {
     return type.replaceAll('_', ' ').replaceAll('/', ' ');
   }
   return '';
-}
-
-function formatCommandExecutionStatus(item, eventType) {
-  const command = String(item?.command || '').trim();
-  if (!command) return 'command_execution';
-
-  const lines = [`$ ${command}`];
-  const output = String(item?.aggregated_output || '').trim();
-  const isCompleted = eventType === 'item.completed' || eventType === 'item/completed' || item?.status === 'completed';
-
-  if (isCompleted) {
-    if (output) lines.push(output);
-    if (item?.exit_code !== null && item?.exit_code !== undefined) {
-      lines.push(`exit code: ${item.exit_code}`);
-    }
-  }
-
-  return lines.join('\n');
-}
-
-function formatMcpToolCallStatus(item) {
-  const server = String(item?.server || item?.server_name || item?.mcp_server || '').trim();
-  const tool = String(item?.tool || item?.tool_name || item?.name || '').trim();
-  if (!server && !tool) return 'mcp_tool_call';
-  return ['MCP', server, tool].filter(Boolean).join(' ');
 }
 
 function extractCodexAssistantText(event) {
