@@ -42,7 +42,7 @@ const config = {
   deployPreview: process.env.FORKABLE_DEPLOY_PREVIEW === 'true',
   deployProduction: process.env.FORKABLE_DEPLOY_PRODUCTION !== 'false',
   codexModel: process.env.CODEX_MODEL || 'gpt-5.5',
-  codexReasoningEffort: process.env.CODEX_REASONING_EFFORT || 'minimal',
+  codexReasoningEffort: process.env.CODEX_REASONING_EFFORT || 'low',
   skipVerification: process.env.FORKABLE_SKIP_VERIFICATION !== 'false',
   checks: parseCommandList(process.env.FORKABLE_CHECK_COMMANDS || ''),
 };
