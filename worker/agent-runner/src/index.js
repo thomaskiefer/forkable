@@ -27,6 +27,8 @@ const config = {
   insforgeProjectId: process.env.INSFORGE_PROJECT_ID || '',
   insforgeCliHome: process.env.INSFORGE_CLI_HOME || path.join(process.env.HOME || '/root', '.insforge'),
   insforgeProjectJson: getSeededJson('INSFORGE_PROJECT_JSON', 'INSFORGE_PROJECT_JSON_B64'),
+  niaConfigHome: process.env.NIA_CONFIG_HOME || path.join(process.env.HOME || '/root', '.config', 'nia'),
+  niaConfigJson: getSeededJson('NIA_CONFIG_JSON', 'NIA_CONFIG_JSON_B64'),
   repoUrl: process.env.FORKABLE_TARGET_REPO_URL || '',
   repoRef: process.env.FORKABLE_TARGET_REPO_REF || 'main',
   repoSubdir: process.env.FORKABLE_TARGET_REPO_SUBDIR || '',
@@ -58,6 +60,7 @@ const state = {
   activeRunId: null,
   codexAuthReady: false,
   insforgeCliAuthReady: false,
+  niaConfigReady: false,
   lastError: null,
   lastRunAt: null,
   startedAt: new Date().toISOString(),
@@ -67,6 +70,7 @@ startHealthServer();
 await mkdir(config.workdir, { recursive: true });
 await mkdir(config.codexHome, { recursive: true });
 await bootstrapInsforgeCliAuth();
+await bootstrapNiaConfig();
 await bootstrapCodexAuth();
 
 if (config.enabled) {
@@ -125,6 +129,7 @@ function startHealthServer() {
         codexAuthMode: getCodexAuthMode(),
         insforgeCliAuthMode: getInsforgeCliAuthMode(),
         niaMcpConfigured: Boolean(process.env.NIA_API_KEY),
+        niaCliConfigMode: state.niaConfigReady ? 'config_file' : 'missing',
         lastError: state.lastError,
         lastRunAt: state.lastRunAt,
         startedAt: state.startedAt,
@@ -1753,6 +1758,33 @@ async function bootstrapInsforgeCliAuth() {
   await writeFile(credentialsPath, credentials);
   await chmod(credentialsPath, 0o600);
   state.insforgeCliAuthReady = true;
+}
+
+async function bootstrapNiaConfig() {
+  await mkdir(config.niaConfigHome, { recursive: true });
+
+  const configPath = path.join(config.niaConfigHome, 'config.json');
+  if (await exists(configPath)) {
+    state.niaConfigReady = true;
+    return;
+  }
+
+  if (config.niaConfigJson) {
+    await writeFile(configPath, config.niaConfigJson);
+    await chmod(configPath, 0o600);
+    state.niaConfigReady = true;
+    return;
+  }
+
+  if (!process.env.NIA_API_KEY) return;
+
+  await writeFile(configPath, JSON.stringify({
+    baseUrl: process.env.NIA_BASE_URL || 'https://apigcp.trynia.ai/v2',
+    useExperimentalApi: process.env.NIA_USE_EXPERIMENTAL_API === 'true',
+    apiKey: process.env.NIA_API_KEY,
+  }, null, 2));
+  await chmod(configPath, 0o600);
+  state.niaConfigReady = true;
 }
 
 function getSeededJson(rawKey, encodedKey) {
