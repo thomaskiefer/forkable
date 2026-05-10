@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState, useTransition } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import { Bell, Check, ExternalLink, Inbox, X } from 'lucide-react';
 import { archiveNotificationAction, markNotificationReadAction } from '@/app/(dashboard)/notifications/actions';
 import { Badge } from '@/components/ui/badge';
@@ -37,6 +37,42 @@ export function NotificationsList({ initialNotifications }: { initialNotificatio
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [notifications, setNotifications] = useState(initialNotifications);
   const unreadCount = notifications.filter((notification) => notification.status === 'unread').length;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshNotifications() {
+      try {
+        const response = await fetch('/api/notifications', { cache: 'no-store' });
+        if (!response.ok) return;
+        const body = (await response.json()) as { notifications?: UserNotification[] };
+        if (!cancelled) {
+          setNotifications(body.notifications ?? []);
+        }
+      } catch {
+        // Keep the current list if a transient refresh fails.
+      }
+    }
+
+    function refreshWhenVisible() {
+      if (document.visibilityState === 'visible') {
+        void refreshNotifications();
+      }
+    }
+
+    const intervalId = globalThis.setInterval(refreshNotifications, 5000);
+    globalThis.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    globalThis.addEventListener('notifications:changed', refreshNotifications);
+
+    return () => {
+      cancelled = true;
+      globalThis.clearInterval(intervalId);
+      globalThis.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      globalThis.removeEventListener('notifications:changed', refreshNotifications);
+    };
+  }, []);
 
   function setNotificationPending(id: string, pending: boolean) {
     setPendingIds((current) => {

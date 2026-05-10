@@ -898,11 +898,7 @@ async function evaluateScheduledTask(task) {
 
   try {
     const content = await runCodexScheduledEvaluation(task);
-    return {
-      summary: content || fallback.summary,
-      raw: content,
-      warranted: inferWorkWarranted(content, task),
-    };
+    return parseScheduledEvaluation(content, fallback, task);
   } catch (error) {
     logError(error, { source: 'scheduled-task-evaluation', taskId: task.id });
     return fallback;
@@ -927,10 +923,78 @@ function inferWorkWarranted(content, task) {
   if (/\b(no work|not warranted|nothing changed|no changes|do not queue|no action)\b/.test(text)) {
     return false;
   }
-  if (/\b(work is warranted|warranted:\s*yes|queue an? agent|create a feature request|implementation objective)\b/.test(text)) {
+  if (/\bno\s+(?:coding[-\s]?agent|codex|agent|coding)\s+run\s+(?:is\s+)?warranted\b/.test(text)) {
+    return false;
+  }
+  if (/\b(?:no|not any)\s+(?:code|coding|implementation)\s+(?:change|changes|work|edits?)\s+(?:is\s+|are\s+)?(?:needed|warranted|required)\b/.test(text)) {
+    return false;
+  }
+  if (/\b(work is warranted|warranted:\s*yes|queue an? (?:coding )?agent|run codex|create a feature request)\b/.test(text)) {
     return true;
   }
   return false;
+}
+
+function parseScheduledEvaluation(content, fallback, task) {
+  const text = String(content || '').trim();
+  if (!text) return fallback;
+
+  const parsed = parseJsonObject(text);
+  if (parsed) {
+    return {
+      summary: sanitizeScheduledEvaluationSummary(parsed.userMessage || parsed.summary || fallback.summary),
+      raw: text,
+      warranted: task.task_type === 'queue_agent' ? true : parsed.warranted === true,
+    };
+  }
+
+  return {
+    summary: sanitizeScheduledEvaluationSummary(text || fallback.summary),
+    raw: text,
+    warranted: inferWorkWarranted(text, task),
+  };
+}
+
+function parseJsonObject(raw) {
+  const text = String(raw || '')
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  if (!text.startsWith('{')) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeScheduledEvaluationSummary(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return 'Automation ran.';
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes('slack') &&
+    (lower.includes('not available') || lower.includes('unavailable') || lower.includes('cancelled') || lower.includes('no slack'))
+  ) {
+    return 'I could not access Slack context for this run, so there were no messages to summarize.';
+  }
+
+  if (
+    /\bno\s+(?:coding[-\s]?agent|codex|agent|coding)\s+run\s+(?:is\s+)?warranted\b/.test(lower) ||
+    /\b(?:no|not any)\s+(?:code|coding|implementation)\s+(?:change|changes|work|edits?)\s+(?:is\s+|are\s+)?(?:needed|warranted|required)\b/.test(lower)
+  ) {
+    return 'I checked the available context. No coding-agent run is needed right now.';
+  }
+
+  const cleaned = text
+    .split('\n')
+    .filter((line) => !/^\s*-?\s*\*\*(customer context considered|codebase impact planning needed before edits|whether work is warranted|smallest useful objective if warranted)\*\*/i.test(line))
+    .filter((line) => !/^\s*-?\s*(customer context considered|codebase impact planning needed before edits|whether work is warranted|smallest useful objective if warranted)\s*:/i.test(line))
+    .join('\n')
+    .trim();
+
+  return cleaned || 'Automation ran.';
 }
 
 async function runCodexScheduledEvaluation(task) {
@@ -966,15 +1030,19 @@ function buildScheduledEvaluationPrompt(task) {
     '',
     'Use Hyperspell MCP first when available for customer context, then use Nia MCP to think through likely codebase impact before recommending edits.',
     'Keep this lightweight. Decide whether this scheduled task warrants a coding-agent run now.',
+    'Do not queue or recommend a coding-agent run for data lookup, Slack/message summarization, reminders, or status reports.',
     '',
     'Scheduled task:',
     JSON.stringify(task, null, 2),
     '',
-    'Return a concise markdown note with:',
-    '- customer context considered',
-    '- codebase impact planning needed before edits',
-    '- whether work is warranted',
-    '- the smallest useful implementation objective if work is warranted',
+    'Return only valid JSON. Do not wrap it in Markdown.',
+    JSON.stringify({
+      warranted: false,
+      userMessage: 'user-facing result to post in the automation chat',
+      reason: 'short internal reason',
+    }, null, 2),
+    '',
+    'Set warranted to true only when a code change should be built by a coding agent.',
   ].join('\n');
 }
 
@@ -1639,7 +1707,8 @@ function buildAutomationSetupPrompt(body) {
     '- For "every day at 3:23 pm PT", use cronExpression "23 15 * * *", scheduleType "daily", timezone "America/Los_Angeles".',
     '- For weekdays, use cronExpression with day-of-week 1-5.',
     '- Use taskType "report_only" for reminders, echo requests, status notes, or simple one-shot messages that do not need code changes.',
-    '- Use taskType "monitor_context" for watch/check/monitor requests that may require customer or repo context before deciding what to do.',
+    '- Use taskType "report_only" for Slack/message/customer-context summaries where the requested output is only a summary.',
+    '- Use taskType "monitor_context" for watch/check/monitor requests that may require customer or repo context before deciding what to do later.',
     '- Use taskType "queue_agent" only when the user explicitly wants a coding agent run queued.',
     '- The title should describe the automation, not say "New automation".',
     '- Keep the prompt durable enough for a future scheduled runner to execute.',
@@ -1700,6 +1769,7 @@ function inferAutomationTaskType(prompt) {
   const text = String(prompt || '').trim().toLowerCase();
   if (!text) return 'monitor_context';
   if (/^(echo|say|tell me|remind me|notify me|send me)\b/.test(text)) return 'report_only';
+  if (/\b(summarize|summary|recap|digest)\b/.test(text) && /\b(slack|message|messages|customer context|context)\b/.test(text)) return 'report_only';
   if (/\b(run codex|coding agent|build|implement|fix|change code|deploy)\b/.test(text)) return 'queue_agent';
   return 'monitor_context';
 }

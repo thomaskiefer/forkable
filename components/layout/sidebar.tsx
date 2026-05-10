@@ -64,14 +64,24 @@ export function Sidebar() {
       }
     }
 
+    function loadWhenVisible() {
+      if (document.visibilityState === 'visible') {
+        void loadUnreadNotifications();
+      }
+    }
+
     void loadUnreadNotifications();
-    const intervalId = globalThis.setInterval(loadUnreadNotifications, 30000);
+    const intervalId = globalThis.setInterval(loadUnreadNotifications, 5000);
     globalThis.addEventListener('notifications:changed', loadUnreadNotifications);
+    globalThis.addEventListener('focus', loadWhenVisible);
+    document.addEventListener('visibilitychange', loadWhenVisible);
 
     return () => {
       cancelled = true;
       globalThis.clearInterval(intervalId);
       globalThis.removeEventListener('notifications:changed', loadUnreadNotifications);
+      globalThis.removeEventListener('focus', loadWhenVisible);
+      document.removeEventListener('visibilitychange', loadWhenVisible);
     };
   }, [pathname]);
 
