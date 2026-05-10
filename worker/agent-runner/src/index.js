@@ -917,22 +917,7 @@ function buildReportOnlyScheduledEvaluation(task) {
 }
 
 function inferWorkWarranted(content, task) {
-  if (task.task_type === 'queue_agent') return true;
-  const text = String(content || '').toLowerCase();
-  if (!text.trim()) return false;
-  if (/\b(no work|not warranted|nothing changed|no changes|do not queue|no action)\b/.test(text)) {
-    return false;
-  }
-  if (/\bno\s+(?:coding[-\s]?agent|codex|agent|coding)\s+run\s+(?:is\s+)?warranted\b/.test(text)) {
-    return false;
-  }
-  if (/\b(?:no|not any)\s+(?:code|coding|implementation)\s+(?:change|changes|work|edits?)\s+(?:is\s+|are\s+)?(?:needed|warranted|required)\b/.test(text)) {
-    return false;
-  }
-  if (/\b(work is warranted|warranted:\s*yes|queue an? (?:coding )?agent|run codex|create a feature request)\b/.test(text)) {
-    return true;
-  }
-  return false;
+  return task.task_type === 'queue_agent';
 }
 
 function parseScheduledEvaluation(content, fallback, task) {
@@ -1750,28 +1735,20 @@ function parseAutomationSetupResult(raw) {
 
   const status = parsed.status === 'configured' ? 'configured' : 'needs_more_info';
   const prompt = typeof parsed.prompt === 'string' ? parsed.prompt : '';
+  if (!['report_only', 'monitor_context', 'queue_agent'].includes(parsed.taskType)) {
+    throw new Error('Codex returned invalid automation setup JSON: taskType must be report_only, monitor_context, or queue_agent.');
+  }
   return {
     status,
     title: typeof parsed.title === 'string' ? parsed.title.slice(0, 120) : 'Scheduled automation',
     prompt,
-    taskType: ['report_only', 'monitor_context', 'queue_agent'].includes(parsed.taskType)
-      ? parsed.taskType
-      : inferAutomationTaskType(prompt),
+    taskType: parsed.taskType,
     cronExpression: typeof parsed.cronExpression === 'string' ? parsed.cronExpression : null,
     scheduleLabel: typeof parsed.scheduleLabel === 'string' ? parsed.scheduleLabel : null,
     scheduleType: typeof parsed.scheduleType === 'string' ? parsed.scheduleType : 'manual',
     timezone: typeof parsed.timezone === 'string' ? parsed.timezone : 'America/Los_Angeles',
     assistantMessage: typeof parsed.assistantMessage === 'string' ? parsed.assistantMessage : '',
   };
-}
-
-function inferAutomationTaskType(prompt) {
-  const text = String(prompt || '').trim().toLowerCase();
-  if (!text) return 'monitor_context';
-  if (/^(echo|say|tell me|remind me|notify me|send me)\b/.test(text)) return 'report_only';
-  if (/\b(summarize|summary|recap|digest)\b/.test(text) && /\b(slack|message|messages|customer context|context)\b/.test(text)) return 'report_only';
-  if (/\b(run codex|coding agent|build|implement|fix|change code|deploy)\b/.test(text)) return 'queue_agent';
-  return 'monitor_context';
 }
 
 function createCodexPlanningEventHandler({ onDelta, onStatus }) {
