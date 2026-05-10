@@ -42,7 +42,7 @@ const config = {
   deployPreview: process.env.FORKABLE_DEPLOY_PREVIEW === 'true',
   deployProduction: process.env.FORKABLE_DEPLOY_PRODUCTION !== 'false',
   codexModel: process.env.CODEX_MODEL || 'gpt-5.5',
-  codexReasoningEffort: process.env.CODEX_REASONING_EFFORT || 'low',
+  codexReasoningEffort: normalizeCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT || 'low'),
   skipVerification: process.env.FORKABLE_SKIP_VERIFICATION !== 'false',
   checks: parseCommandList(process.env.FORKABLE_CHECK_COMMANDS || ''),
 };
@@ -127,6 +127,7 @@ function startHealthServer() {
         runnerId,
         activeRunId: state.activeRunId,
         codexAuthMode: getCodexAuthMode(),
+        codexReasoningEffort: config.codexReasoningEffort,
         insforgeCliAuthMode: getInsforgeCliAuthMode(),
         niaMcpConfigured: Boolean(process.env.NIA_API_KEY),
         niaCliConfigMode: state.niaConfigReady ? 'config_file' : 'missing',
@@ -1776,6 +1777,13 @@ function buildCodexConfig(workspace, options = {}) {
   return `${parts.join('\n')}\n`;
 }
 
+function normalizeCodexReasoningEffort(value) {
+  const requested = String(value || 'low').trim().toLowerCase();
+  if (requested === 'none' || requested === 'minimal') return 'low';
+  if (['low', 'medium', 'high', 'xhigh'].includes(requested)) return requested;
+  return 'low';
+}
+
 async function prepareCodexHome(codexHome, workspace, options = {}) {
   await mkdir(codexHome, { recursive: true });
   await writeFile(path.join(codexHome, 'config.toml'), buildCodexConfig(workspace, options));
@@ -2588,6 +2596,13 @@ function formatPlanningChatError(error) {
 
   if (message.includes('Command timed out')) {
     return 'The planning agent timed out. Retry with a shorter request or check the runner logs.';
+  }
+
+  if (
+    message.includes("cannot be used with reasoning.effort 'minimal'") ||
+    message.includes('cannot be used with reasoning.effort "minimal"')
+  ) {
+    return 'The runner Codex reasoning effort is too low for available tools. Redeploy the runner with CODEX_REASONING_EFFORT=low or newer, then retry the planning chat.';
   }
 
   return 'The planning agent failed. Check the runner logs for details, then retry.';
