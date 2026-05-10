@@ -21,7 +21,7 @@ VALUES (
   'sort_clients_table_by_attribute',
   true,
   'production',
-  'Enabled for request 85800b56-6e2a-4c90-8b01-158da075cf4c.',
+  'Enabled for request 847a87cd-171a-4784-9326-82b257455d87.',
   '717ac12a-df48-4742-accc-708e4507ba5b'
 )
 ON CONFLICT (company_account_id, feature_key, user_id)
@@ -34,4 +34,4 @@ DO UPDATE SET
 UPDATE public.change_requests
 SET feature_key = 'sort_clients_table_by_attribute',
     updated_at = now()
-WHERE id = '85800b56-6e2a-4c90-8b01-158da075cf4c';
+WHERE id = '847a87cd-171a-4784-9326-82b257455d87';
