@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { ArrowUpRight, BriefcaseBusiness, GitPullRequestArrow, Plus, Users } from 'lucide-react';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
-import { getChangeRequests, getClients, getProjects } from '@/lib/queries';
+import { getChangeRequests, getClients, getProjects, hasFeatureFlag } from '@/lib/queries';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -39,6 +39,8 @@ const healthTone: Record<string, string> = {
   Risk: 'border-destructive/30 bg-destructive/10 text-destructive',
   Dormant: 'border-border bg-muted/40 text-muted-foreground',
 };
+
+const CLIENT_NAME_RAINBOW_FEATURE = 'client_name_rainbow_color';
 
 function initials(name: string) {
   return name
@@ -139,10 +141,11 @@ function getHealth(
 
 export default async function ClientsPage() {
   const { accessToken: token } = await requireAuthenticatedSession();
-  const [{ clients, count }, projectsResult, changeRequests] = await Promise.all([
+  const [{ clients, count }, projectsResult, changeRequests, showRainbowClientNames] = await Promise.all([
     getClients(token),
     getProjects(token),
     getChangeRequests(token),
+    hasFeatureFlag(CLIENT_NAME_RAINBOW_FEATURE, token),
   ]);
 
   const projects = projectsResult.projects as ProjectRow[];
@@ -267,7 +270,14 @@ export default async function ClientsPage() {
                         {initials(name)}
                       </div>
                       <div className="min-w-0 space-y-0.5">
-                        <p className="truncate font-medium">{name}</p>
+                        <p
+                          className={cn(
+                            'truncate font-medium text-foreground',
+                            showRainbowClientNames && 'client-name-rainbow',
+                          )}
+                        >
+                          {name}
+                        </p>
                       </div>
                     </div>
                     <div className="text-sm">
