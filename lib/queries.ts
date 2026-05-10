@@ -1537,8 +1537,8 @@ export async function createQueuedAgentRunFromPlan(
       `Create InsForge backend branch ${branchPart}`,
       'Implement additive schema and backend enforcement',
       'Update feature-gated CRM UI',
-      'Deploy preview and run smoke tests',
-      'Merge, deploy, enable company flag, and notify requester',
+      'Run quick sanity checks',
+      'Commit, push, deploy, enable company flag, and notify requester',
     ].map((label, index) => ({
       run_id: run.id,
       order_index: index + 1,
@@ -1678,8 +1678,8 @@ export async function createQueuedAgentRunFromScheduledExecution(
       `Create Git branch feat/${branchPart}`,
       `Create InsForge backend branch ${branchPart}`,
       'Implement additive changes requested by the scheduled task',
-      'Deploy preview and run smoke tests',
-      'Merge, deploy, enable company flag, and notify requester',
+      'Run quick sanity checks',
+      'Commit, push, deploy, enable company flag, and notify requester',
     ].map((label, index) => ({
       run_id: run.id,
       order_index: index + 1,

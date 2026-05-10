@@ -789,7 +789,8 @@ function buildCodingAgentPrompt(
     '- Scope rollout through company_account_id and company_feature_flags, not a manually selected customer.',
     '- Enforce workflow rules in the backend mutation path.',
     '- Add a focused UI using existing components and design conventions.',
-    '- Return exact changed files, schema changes, smoke test results, preview URL, and review notes.',
+    '- Return exact changed files, schema changes, fast checks performed, and residual risks.',
+    '- Do not report a preview URL unless one already exists in the run context.',
   ].join('\n');
 }
 
