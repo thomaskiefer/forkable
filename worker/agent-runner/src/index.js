@@ -1487,13 +1487,70 @@ function createCodexPlanningEventHandler({ onDelta, onStatus }) {
 function extractCodexStatus(event) {
   const type = String(event?.method || event?.type || event?.msg?.type || '');
   if (type === 'item/started' || type === 'item.started') {
-    const itemType = String(event?.params?.item?.type || event?.item?.type || '');
+    const item = getCodexEventItem(event);
+    const itemType = String(item?.type || '');
+    if (itemType === 'command_execution') return formatCommandExecutionStatus(item);
+    if (itemType === 'mcp_tool_call') return formatMcpToolCallStatus(item);
     if (itemType && !['agentMessage', 'agent_message'].includes(itemType)) return itemType;
+  }
+  if (type === 'item/completed' || type === 'item.completed') {
+    const item = getCodexEventItem(event);
+    const itemType = String(item?.type || '');
+    if (itemType === 'command_execution') return formatCommandExecutionStatus(item);
+    if (itemType === 'mcp_tool_call') return formatMcpToolCallStatus(item);
   }
   if (type.includes('tool') || type.includes('exec') || type.includes('mcp')) {
     return type.replaceAll('_', ' ').replaceAll('/', ' ');
   }
   return '';
+}
+
+function getCodexEventItem(event) {
+  return event?.params?.item || event?.item || event?.msg?.item || null;
+}
+
+function formatCommandExecutionStatus(item) {
+  const command = stringifyCodexCommand(item?.command || item?.cmd || item?.arguments);
+  const status = item?.status ? `status: ${item.status}` : '';
+  const exitCode = item?.exit_code ?? item?.exitCode ?? item?.exit_status ?? item?.exitStatus;
+  const output = String(item?.aggregated_output || item?.output || item?.stdout || item?.stderr || '').trim();
+  const lines = [];
+
+  lines.push(command ? `$ ${command}` : 'command_execution');
+  if (output) lines.push(trimActivityOutput(output, 1800));
+  if (exitCode !== undefined && exitCode !== null) lines.push(`exit code: ${exitCode}`);
+  if (!output && status) lines.push(status);
+
+  return lines.join('\n');
+}
+
+function formatMcpToolCallStatus(item) {
+  const server = item?.server || item?.server_name || item?.mcp_server || item?.mcpServer;
+  const tool = item?.tool || item?.tool_name || item?.name;
+  const label = [server, tool].filter(Boolean).join(' ');
+  return label ? `MCP ${label}` : 'mcp_tool_call';
+}
+
+function stringifyCodexCommand(command) {
+  if (Array.isArray(command)) return command.map(shellQuote).join(' ');
+  if (command && typeof command === 'object') {
+    if (Array.isArray(command.argv)) return command.argv.map(shellQuote).join(' ');
+    if (typeof command.command === 'string') return command.command;
+    if (typeof command.cmd === 'string') return command.cmd;
+    return JSON.stringify(command);
+  }
+  return typeof command === 'string' ? command : '';
+}
+
+function shellQuote(value) {
+  const text = String(value);
+  return /^[A-Za-z0-9_./:=@%+-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+function trimActivityOutput(value, maxLength) {
+  const text = String(value);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 80)}\n...[truncated ${text.length - (maxLength - 80)} chars]`;
 }
 
 function extractCodexAssistantText(event) {
