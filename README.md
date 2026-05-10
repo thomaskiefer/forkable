@@ -148,11 +148,12 @@ deployments. Seed it from a trusted local CLI login:
 ```bash
 base64 -i ~/.insforge/credentials.json | tr -d '\n'
 base64 -i ~/.insforge/config.json | tr -d '\n'
+base64 -i .insforge/project.json | tr -d '\n'
 ```
 
 Set those values as `INSFORGE_CLI_CREDENTIALS_JSON_B64` and
-`INSFORGE_CLI_CONFIG_JSON_B64`, and set `INSFORGE_PROJECT_ID` to the target
-project id.
+`INSFORGE_CLI_CONFIG_JSON_B64` and `INSFORGE_PROJECT_JSON_B64`, and set
+`INSFORGE_PROJECT_ID` to the target project id.
 
 To route the request-planning chat through the runner, set these on the Next app:
 

@@ -26,10 +26,12 @@ const config = {
   insforgeAccessToken: process.env.INSFORGE_ACCESS_TOKEN || '',
   insforgeProjectId: process.env.INSFORGE_PROJECT_ID || '',
   insforgeCliHome: process.env.INSFORGE_CLI_HOME || path.join(process.env.HOME || '/root', '.insforge'),
+  insforgeProjectJson: getSeededJson('INSFORGE_PROJECT_JSON', 'INSFORGE_PROJECT_JSON_B64'),
   repoUrl: process.env.FORKABLE_TARGET_REPO_URL || '',
   repoRef: process.env.FORKABLE_TARGET_REPO_REF || 'main',
   repoSubdir: process.env.FORKABLE_TARGET_REPO_SUBDIR || '',
   workdir: process.env.FORKABLE_WORKDIR || path.join(process.cwd(), '.forkable-agent-runs'),
+  repoCacheDir: process.env.FORKABLE_REPO_CACHE_DIR || path.join(process.cwd(), '.forkable-repo-cache'),
   codexHome: process.env.FORKABLE_CODEX_HOME || path.join(process.cwd(), '.forkable-codex-home'),
   pushBranch: process.env.FORKABLE_PUSH_BRANCH !== 'false',
   autoMerge: process.env.FORKABLE_AUTO_MERGE !== 'false',
@@ -39,6 +41,7 @@ const config = {
   deployProduction: process.env.FORKABLE_DEPLOY_PRODUCTION !== 'false',
   codexModel: process.env.CODEX_MODEL || 'gpt-5.5',
   codexReasoningEffort: process.env.CODEX_REASONING_EFFORT || 'low',
+  skipVerification: process.env.FORKABLE_SKIP_VERIFICATION !== 'false',
   checks: parseCommandList(process.env.FORKABLE_CHECK_COMMANDS || ''),
 };
 
@@ -1056,7 +1059,7 @@ async function executeRun(run, streamHandlers = {}) {
     await upsertPreview(run, preview);
   }
 
-  const checksPassed = checks.every((check) => check.status === 'passed');
+  const checksPassed = checks.every((check) => ['passed', 'skipped'].includes(check.status));
   let finalization = null;
 
   if (checksPassed) {
@@ -1160,14 +1163,42 @@ async function loadRunContext(run) {
 }
 
 async function prepareRepository(run, runDir) {
-  await setStep(run.id, 2, 'running', 'Preparing repository checkout for Nia/Codex inspection.');
+  await setStep(run.id, 2, 'running', 'Refreshing reusable repository checkout for Nia/Codex inspection.');
 
-  const repoRoot = path.join(runDir, 'repo');
+  const repoRoot = path.join(config.repoCacheDir, 'repo');
   const cloneUrl = authenticatedGitUrl(config.repoUrl);
-  await execCommand('git', ['clone', '--depth', '1', '--branch', config.repoRef, cloneUrl, repoRoot], {
-    cwd: runDir,
-    logPath: path.join(runDir, 'git-clone.log'),
-  });
+
+  if (await exists(path.join(repoRoot, '.git'))) {
+    await execCommand('git', ['remote', 'set-url', 'origin', cloneUrl], {
+      cwd: repoRoot,
+      logPath: path.join(runDir, 'git-remote.log'),
+    });
+    await execCommand('git', ['fetch', 'origin', config.repoRef, '--prune'], {
+      cwd: repoRoot,
+      logPath: path.join(runDir, 'git-fetch.log'),
+      timeoutMs: 10 * 60 * 1000,
+    });
+    await execCommand('git', ['checkout', config.repoRef], {
+      cwd: repoRoot,
+      logPath: path.join(runDir, 'git-checkout-base.log'),
+    });
+    await execCommand('git', ['reset', '--hard', `origin/${config.repoRef}`], {
+      cwd: repoRoot,
+      logPath: path.join(runDir, 'git-reset.log'),
+    });
+    await execCommand('git', ['clean', '-fd'], {
+      cwd: repoRoot,
+      logPath: path.join(runDir, 'git-clean.log'),
+    });
+  } else {
+    await rm(repoRoot, { recursive: true, force: true });
+    await mkdir(path.dirname(repoRoot), { recursive: true });
+    await execCommand('git', ['clone', '--branch', config.repoRef, cloneUrl, repoRoot], {
+      cwd: path.dirname(repoRoot),
+      logPath: path.join(runDir, 'git-clone.log'),
+      timeoutMs: 10 * 60 * 1000,
+    });
+  }
 
   await execCommand('git', ['checkout', '-B', run.git_branch || `feat/${run.id}`], {
     cwd: repoRoot,
@@ -1183,9 +1214,24 @@ async function prepareRepository(run, runDir) {
     logPath: path.join(runDir, 'git-config.log'),
   });
 
-  await setStep(run.id, 2, 'passed', 'Repository cloned and feature branch checked out.');
+  await setStep(run.id, 2, 'passed', 'Reusable repository checkout refreshed to the latest target ref.');
   await setStep(run.id, 3, 'passed', `Git branch ready: ${run.git_branch || `feat/${run.id}`}`);
+  await prepareInsforgeProjectLink(repoRoot);
   return repoRoot;
+}
+
+async function prepareInsforgeProjectLink(workspace) {
+  const projectJson = config.insforgeProjectJson || buildMinimalInsforgeProjectJson();
+  if (!projectJson) return;
+
+  const insforgeDir = path.join(workspace, '.insforge');
+  await mkdir(insforgeDir, { recursive: true });
+  await writeFile(path.join(insforgeDir, 'project.json'), projectJson);
+}
+
+function buildMinimalInsforgeProjectJson() {
+  if (!config.insforgeProjectId) return '';
+  return `${JSON.stringify({ project_id: config.insforgeProjectId }, null, 2)}\n`;
 }
 
 function authenticatedGitUrl(url) {
@@ -1229,6 +1275,7 @@ async function runCodex(run, context, workspace, runDir, streamHandlers = {}) {
   const finalPath = path.join(runDir, 'final.md');
   const promptPath = path.join(runDir, 'prompt.md');
   await prepareCodexHome(codexHome, workspace);
+  await writeFile(path.join(workspace, 'FORKABLE_RUNNER.md'), buildRunnerRunbook(run, context));
   await writeFile(promptPath, buildPrompt(run, context));
 
   await runCodexExec({
@@ -1247,6 +1294,32 @@ async function runCodex(run, context, workspace, runDir, streamHandlers = {}) {
   const finalMessage = await readTextIfExists(finalPath);
   await persistCodexAuth(codexHome);
   return { finalMessage };
+}
+
+function buildRunnerRunbook(run, context) {
+  return [
+    '# Forkable Runner Instructions',
+    '',
+    'Achieve the requested task as fast as possible.',
+    '',
+    'Use the repository already checked out in this workspace. It has been refreshed to the latest target branch before this run. Do not reclone it.',
+    '',
+    'Default execution rules:',
+    '- Make the smallest useful code/data change that satisfies the request.',
+    '- Do not run slow verification commands such as full production builds unless the request or a very risky edit makes them necessary.',
+    '- Prefer quick targeted checks, syntax checks, or direct smoke checks over install/typecheck/build cycles.',
+    '- If no code change is required, say so and finish immediately.',
+    '- Use `npx @insforge/cli` for InsForge commands. The runner has non-interactive InsForge auth and a project link configured.',
+    '- If deployment is required, deploy the current workspace with `npx @insforge/cli deployments deploy . --json`.',
+    '- Do not ask the user for company/customer scope; use the authenticated company context in the request.',
+    '',
+    'Current run:',
+    `- Run id: ${run.id}`,
+    `- Git branch: ${run.git_branch || `feat/${run.id}`}`,
+    `- Request title: ${context.request.title}`,
+    `- Requesting company account: ${context.request.company_account_id || 'unknown'}`,
+    '',
+  ].join('\n');
 }
 
 async function runCodexPlanningChat(body, streamHandlers = {}) {
@@ -1780,6 +1853,8 @@ function buildPrompt(run, context) {
   return [
     'You are the coding agent for Forkable.',
     '',
+    'Before doing anything else, read FORKABLE_RUNNER.md in the workspace and follow it. It is the operational runbook for this Compute run.',
+    '',
     'Goal:',
     plan.coding_agent_prompt || plan.summary || context.request.description,
     '',
@@ -1851,6 +1926,16 @@ async function commitAndMaybePush(run, workspace) {
 }
 
 async function runChecks(workspace, runDir) {
+  if (config.skipVerification && config.checks.length === 0) {
+    const results = [{
+      name: 'Runner verification skipped',
+      status: 'skipped',
+      details: 'FORKABLE_SKIP_VERIFICATION is enabled. Codex is instructed to use only fast targeted checks when needed.',
+    }];
+    await setStepFromRunDir(runDir, 7, 'skipped', results[0].details);
+    return results;
+  }
+
   await setStepFromRunDir(runDir, 7, 'running', 'Running verification commands.');
 
   const commands = config.checks.length > 0 ? config.checks : await detectChecks(workspace);
@@ -1878,7 +1963,7 @@ async function runChecks(workspace, runDir) {
     });
   }
 
-  const allPassed = results.every((result) => result.status === 'passed');
+  const allPassed = results.every((result) => ['passed', 'skipped'].includes(result.status));
   await setStepFromRunDir(
     runDir,
     7,
