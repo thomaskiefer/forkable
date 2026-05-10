@@ -738,13 +738,11 @@ export async function streamImplementationMessage(input: {
 
 function buildImplementationPlan(request: ChangeRequest) {
   return [
-    `1. Use Nia to inspect the ${request.title} impact area before changing files: request/detail UI, pipeline movement, database queries, migrations, RLS policies, and existing shadcn components.`,
-    '2. Create a safe Git branch and an InsForge backend branch so code, schema, RLS, and functions are isolated from production.',
-    `3. Add or reuse the feature flag ${request.feature_key ?? 'for this request'} and scope rollout to the requesting company through company_account_id/company_feature_flags.`,
-    '4. Implement additive persistence for the requested workflow and audit trail; do not drop or rewrite existing CRM tables.',
-    '5. Enforce the workflow in the backend path that mutates production state, not only in frontend UI.',
-    '6. Add the smallest clear UI to explain the requirement, collect the missing decision, and show persisted status.',
-    '7. Deploy a preview, run smoke tests, then automatically merge, deploy, enable the company flag, and notify the requester.',
+    `1. Use Nia to inspect the ${request.title} impact area before changing files.`,
+    `2. Add or reuse feature flag ${request.feature_key ?? 'for this request'} and scope rollout through company_account_id/company_feature_flags.`,
+    '3. Make the smallest additive code/data change that satisfies the request.',
+    '4. Preserve behavior for companies without the flag.',
+    '5. Run only fast checks, then commit, push, merge to main, deploy production, and enable the company flag.',
   ].join('\n');
 }
 

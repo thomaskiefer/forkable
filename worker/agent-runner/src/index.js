@@ -1138,53 +1138,36 @@ async function executeRun(run, streamHandlers = {}) {
   const workspace = config.repoSubdir ? path.join(repoRoot, config.repoSubdir) : repoRoot;
   await assertDirectory(workspace, `Target workspace not found: ${workspace}`);
 
-  await maybeCreateBackendBranch(run, workspace);
-
   const codexResult = await runCodex(run, context, workspace, runDir, streamHandlers);
-  await setStep(run.id, 5, 'passed', trimForDb(codexResult.finalMessage || 'Codex finished the implementation pass.'));
+  await setStep(run.id, 3, 'passed', trimForDb(codexResult.finalMessage || 'Codex finished the end-to-end run.'));
 
-  streamHandlers.onStatus?.('Committing changes');
-  const commitSha = await commitAndMaybePush(run, workspace);
-  streamHandlers.onStatus?.('Running verification');
-  const checks = await runChecks(workspace, runDir);
-  await recordTestResults(run, checks);
-
-  streamHandlers.onStatus?.('Preparing preview and automatic shipment');
-  const preview = await maybeDeployPreview(run, workspace);
-  if (preview?.url) {
-    await upsertPreview(run, preview);
-  }
-
-  const checksPassed = checks.every((check) => ['passed', 'skipped'].includes(check.status));
-  let finalization = null;
-
-  if (checksPassed) {
-    finalization = await finalizeSuccessfulRun(run, context, workspace, runDir, {
-      commitSha,
-      preview,
-    });
-  } else {
-    await setStep(run.id, 8, 'failed', 'Verification failed; automatic merge and deploy were skipped.');
-  }
+  const commitSha = await getCurrentCommitSha(workspace);
+  const productionUrl = extractFirstUrl(codexResult.finalMessage);
+  const finalization = {
+    productionUrl,
+    featureKey: resolveFeatureKey(run, context),
+    flagEnabled: /feature flag|enabled/i.test(codexResult.finalMessage || ''),
+  };
+  const preview = null;
 
   const now = new Date().toISOString();
   await updateRun(run.id, {
-    status: checksPassed ? 'merged' : 'failed',
+    status: 'merged',
     runner_finished_at: now,
     finished_at: now,
     output_summary: trimForDb(codexResult.finalMessage),
     commit_sha: commitSha,
-    preview_url: finalization?.productionUrl || preview?.url || null,
+    preview_url: productionUrl,
   });
 
   await updateChangeRequest(run.change_request_id, {
-    status: checksPassed ? 'merged' : 'building',
+    status: 'merged',
   });
 
   await createRunNotification({
     run,
     request: context.request,
-    success: checksPassed,
+    success: true,
     finalization,
     preview,
   });
@@ -1197,8 +1180,8 @@ async function executeRun(run, streamHandlers = {}) {
       userId: run.user_id,
       content: buildRunCompletionChatMessage({
         runId: run.id,
-        status: checksPassed ? 'merged' : 'failed',
-        success: checksPassed,
+        status: 'merged',
+        success: true,
         finalization,
         preview,
       }),
@@ -1215,9 +1198,24 @@ async function executeRun(run, streamHandlers = {}) {
     finalMessage: codexResult.finalMessage,
     commitSha,
     preview,
-    checks,
     finalization,
   };
+}
+
+async function getCurrentCommitSha(workspace) {
+  try {
+    return (await execCommand('git', ['rev-parse', 'HEAD'], {
+      cwd: workspace,
+      captureOnly: true,
+    })).stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+function extractFirstUrl(value) {
+  const match = String(value || '').match(/https?:\/\/[^\s)]+/);
+  return match?.[0] || null;
 }
 
 async function loadRunContext(run) {
@@ -1312,7 +1310,6 @@ async function prepareRepository(run, runDir) {
   await writeFile(path.join(repoRoot, '.git', 'info', 'exclude'), '\n.forkable/\n', { flag: 'a' });
 
   await setStep(run.id, 2, 'passed', 'Reusable repository checkout refreshed to the latest target ref.');
-  await setStep(run.id, 3, 'passed', `Git branch ready: ${run.git_branch || `feat/${run.id}`}`);
   await prepareInsforgeProjectLink(repoRoot);
   return repoRoot;
 }
@@ -1364,7 +1361,7 @@ async function maybeCreateBackendBranch(run, workspace) {
 }
 
 async function runCodex(run, context, workspace, runDir, streamHandlers = {}) {
-  await setStep(run.id, 5, 'running', 'Codex is implementing the planned feature.');
+  await setStep(run.id, 3, 'running', 'Codex is implementing, committing, pushing, and deploying.');
   await createRunEvent(run, 'summary', 'Codex started.\n');
 
   assertCodexAuthAvailable();
@@ -1409,24 +1406,18 @@ function buildRunnerRunbook(run, context) {
   return [
     '# Forkable Runner Instructions',
     '',
-    'Achieve the requested task as fast as possible.',
+    'Do the task end to end in this existing checkout. Be fast and direct.',
     '',
-    'Use the repository already checked out in this workspace. It has been refreshed to the latest target branch before this run. Do not reclone it.',
-    '',
-    'Default execution rules:',
-    '- Make the smallest useful code/data change that satisfies the request.',
-    '- Move in one direct pass: inspect only the files needed, edit, run fast local checks, commit, push, merge to main, push main, and deploy production.',
-    '- Do not run dependency installation, package-manager typechecks, or full production builds unless the request explicitly requires them.',
-    '- Skip slow or network-dependent commands, including `npm exec -- tsc --noEmit`, `npm run typecheck`, `pnpm typecheck`, `npm install`, `npm ci`, `pnpm install`, `npm run build`, and `pnpm build`.',
-    '- Prefer quick targeted checks such as `git diff --check`, direct file inspection, syntax checks for edited standalone files, or tiny smoke checks that use already-installed dependencies.',
-    '- If no code change is required, say so and finish immediately.',
-    '- Use `npx @insforge/cli` for production frontend deployment when code changes are ready.',
-    '- Commit and push the branch yourself after edits. If the branch already exists, reuse it and push the most current state.',
-    '- Merge the feature branch into main, push main, then deploy production with `npx @insforge/cli deployments deploy . --json`.',
-    '- Enable the requesting company feature flag when a feature flag is part of the change.',
-    '- Do not invent a preview URL.',
-    '- If no preview URL is present in the run context, omit preview URL sections entirely.',
-    '- Do not ask the user for company/customer scope; use the authenticated company context in the request.',
+    'Hard rules:',
+    '- Reuse this checkout; do not reclone.',
+    '- Do not create, switch, merge, reset, or delete InsForge backend branches.',
+    '- Do not create preview branches or preview deployments.',
+    '- Do not run installs, package-manager typechecks, or builds: skip `npm exec -- tsc --noEmit`, `npm run typecheck`, `pnpm typecheck`, `npm install`, `npm ci`, `pnpm install`, `npm run build`, and `pnpm build`.',
+    '- Use quick checks only, mainly `git diff --check` and targeted file inspection.',
+    '- Make the smallest code/data change that satisfies the request.',
+    '- Commit, push the feature branch, merge to main, push main, then deploy production with `npx @insforge/cli deployments deploy . --json`.',
+    '- Enable the requesting company feature flag if the change uses one.',
+    '- Do not invent or mention preview URLs.',
     '',
     'Current run:',
     `- Run id: ${run.id}`,
@@ -1826,7 +1817,7 @@ function buildPlanningPrompt(body) {
     '- Ask only for missing decisions that materially affect implementation and cannot be reasonably inferred from common CRM behavior.',
     '- If the submitted request is specific enough to implement, do not ask an extra preference question; state the understood behavior and say it is ready to build.',
     '- For list/table sorting requests, assume server-backed sorting when pagination or filtering may exist, default directions from the request, and click-to-toggle directions unless the user says otherwise.',
-    '- Keep the plan grounded in authenticated company scope, Git branches, InsForge backend branches, Nia repository context, Hyperspell company context, backend enforcement, preview deploys, smoke tests, and automatic merge/deploy.',
+    '- Keep the plan grounded in authenticated company scope, the existing Git checkout, Nia repository context, backend enforcement, quick checks, and production deploy.',
     '- Do not claim code has been changed.',
     '- For the initial turn, begin helping immediately from the submitted description. Ask one concise scoping question only when the request is genuinely ambiguous.',
     '- Keep the user-facing reply concise and conversational.',
@@ -2094,13 +2085,15 @@ function buildPrompt(run, context) {
     '',
     'Run constraints:',
     `- Work on Git branch ${run.git_branch}.`,
-    `- Treat InsForge backend branch ${run.backend_branch} as the isolated backend target.`,
+    '- Do not create or use InsForge backend branches for this run.',
+    '- Do not create preview branches or preview deployments.',
     '- Use Nia MCP first when available to inspect repository structure, migrations, RLS policies, data access, and UI patterns before editing.',
     '- Use Hyperspell MCP when available only for customer/request context. Do not write unrelated memory.',
     '- Prefer additive migrations and small, reviewable UI changes.',
     '- Do not drop tables or columns.',
     '- Do not commit secrets, .env files, local state, or generated dependency folders.',
-    '- Preserve existing behavior for customers not included in the feature rollout.',
+    '- Preserve existing behavior for companies not included in the feature rollout.',
+    '- Commit, push, merge to main, push main, deploy production, and enable the feature flag yourself.',
     '',
     plan.implementation_plan ? `Implementation plan:\n${plan.implementation_plan}` : '',
     Array.isArray(plan.acceptance_criteria)

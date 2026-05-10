@@ -1531,14 +1531,9 @@ export async function createQueuedAgentRunFromPlan(
 
   try {
     const steps = [
-      'Load finalized planning chat and context bundle',
-      'Use Nia to inspect repo, migrations, RLS, and UI patterns',
-      `Create Git branch feat/${branchPart}`,
-      `Create InsForge backend branch ${branchPart}`,
-      'Implement additive schema and backend enforcement',
-      'Update feature-gated CRM UI',
-      'Run quick sanity checks',
-      'Commit, push, deploy, enable company flag, and notify requester',
+      'Load request context',
+      'Prepare checkout',
+      'Run Codex end-to-end',
     ].map((label, index) => ({
       run_id: run.id,
       order_index: index + 1,
@@ -1673,13 +1668,9 @@ export async function createQueuedAgentRunFromScheduledExecution(
 
   try {
     const steps = [
-      'Load scheduled task, finalized plan, and context bundle',
-      'Use Nia to inspect repo, migrations, RLS, and UI patterns',
-      `Create Git branch feat/${branchPart}`,
-      `Create InsForge backend branch ${branchPart}`,
-      'Implement additive changes requested by the scheduled task',
-      'Run quick sanity checks',
-      'Commit, push, deploy, enable company flag, and notify requester',
+      'Load scheduled context',
+      'Prepare checkout',
+      'Run Codex end-to-end',
     ].map((label, index) => ({
       run_id: run.id,
       order_index: index + 1,
