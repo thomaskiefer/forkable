@@ -1139,35 +1139,43 @@ async function executeRun(run, streamHandlers = {}) {
   await assertDirectory(workspace, `Target workspace not found: ${workspace}`);
 
   const codexResult = await runCodex(run, context, workspace, runDir, streamHandlers);
-  await setStep(run.id, 3, 'passed', trimForDb(codexResult.finalMessage || 'Codex finished the end-to-end run.'));
+  const finalMessage = codexResult.finalMessage || '';
+  const runSucceeded = didCodexShip(finalMessage);
+  await setStep(
+    run.id,
+    3,
+    runSucceeded ? 'passed' : 'failed',
+    trimForDb(finalMessage || 'Codex finished without proving that push, merge, and deploy completed.'),
+  );
 
   const commitSha = await getCurrentCommitSha(workspace);
-  const productionUrl = extractFirstUrl(codexResult.finalMessage);
+  const productionUrl = runSucceeded ? extractFirstUrl(finalMessage) : null;
   const finalization = {
     productionUrl,
     featureKey: resolveFeatureKey(run, context),
-    flagEnabled: /feature flag|enabled/i.test(codexResult.finalMessage || ''),
+    flagEnabled: runSucceeded && /feature flag|enabled/i.test(finalMessage),
   };
   const preview = null;
 
   const now = new Date().toISOString();
   await updateRun(run.id, {
-    status: 'merged',
+    status: runSucceeded ? 'merged' : 'failed',
     runner_finished_at: now,
     finished_at: now,
-    output_summary: trimForDb(codexResult.finalMessage),
-    commit_sha: commitSha,
+    runner_error: runSucceeded ? null : trimForDb(extractCodexFailureReason(finalMessage)),
+    output_summary: trimForDb(finalMessage),
+    commit_sha: runSucceeded ? commitSha : null,
     preview_url: productionUrl,
   });
 
   await updateChangeRequest(run.change_request_id, {
-    status: 'merged',
+    status: runSucceeded ? 'merged' : 'building',
   });
 
   await createRunNotification({
     run,
     request: context.request,
-    success: true,
+    success: runSucceeded,
     finalization,
     preview,
   });
@@ -1180,8 +1188,8 @@ async function executeRun(run, streamHandlers = {}) {
       userId: run.user_id,
       content: buildRunCompletionChatMessage({
         runId: run.id,
-        status: 'merged',
-        success: true,
+        status: runSucceeded ? 'merged' : 'failed',
+        success: runSucceeded,
         finalization,
         preview,
       }),
@@ -1195,11 +1203,28 @@ async function executeRun(run, streamHandlers = {}) {
   }
 
   return {
-    finalMessage: codexResult.finalMessage,
+    finalMessage,
     commitSha,
     preview,
     finalization,
   };
+}
+
+function didCodexShip(finalMessage) {
+  const text = String(finalMessage || '').toLowerCase();
+  if (!text.trim()) return false;
+  if (/\*\*blocked\*\*|\bblocked\b|push failed|merge failed|deploy failed|did not merge|did not deploy|fatal:/.test(text)) {
+    return false;
+  }
+  return /\b(merged|pushed main|deployed|production deploy|deployment)\b/.test(text);
+}
+
+function extractCodexFailureReason(finalMessage) {
+  const text = String(finalMessage || '').trim();
+  const blocked = text.match(/\*\*Blocked\*\*([\s\S]*?)(?:\n\n\*\*|$)/i);
+  if (blocked?.[1]) return blocked[1].trim();
+  const fatalLine = text.split('\n').find((line) => /fatal:|failed|blocked/i.test(line));
+  return fatalLine || 'Codex finished without proving that push, merge, and deploy completed.';
 }
 
 async function getCurrentCommitSha(workspace) {
@@ -1329,7 +1354,7 @@ function buildMinimalInsforgeProjectJson() {
 }
 
 function authenticatedGitUrl(url) {
-  const token = process.env.GITHUB_TOKEN;
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   if (!token || !url.startsWith('https://github.com/')) return url;
   const withoutProtocol = url.replace('https://', '');
   return `https://x-access-token:${encodeURIComponent(token)}@${withoutProtocol}`;
