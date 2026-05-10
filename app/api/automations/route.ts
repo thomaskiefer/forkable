@@ -76,6 +76,7 @@ export async function POST(request: NextRequest) {
       prompt,
       customerName: company.name,
       customerEmail: requesterEmail,
+      companyAccountId: company.id,
       taskType: body.task_type ?? 'monitor_context',
       featureKey: body.feature_key ?? null,
       scheduleType: body.cron_expression ? 'cron' : 'manual',

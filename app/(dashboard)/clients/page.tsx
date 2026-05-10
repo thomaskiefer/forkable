@@ -1,7 +1,7 @@
 import Link from 'next/link';
-import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, BriefcaseBusiness, GitPullRequestArrow, Plus, Users } from 'lucide-react';
+import { ArrowUpRight, BriefcaseBusiness, GitPullRequestArrow, Plus, Users } from 'lucide-react';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
-import { getChangeRequests, getClients, getProjects, hasFeatureFlag } from '@/lib/queries';
+import { getChangeRequests, getClients, getProjects } from '@/lib/queries';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -11,34 +11,17 @@ import { cn } from '@/lib/utils';
 type ClientRow = Record<string, unknown>;
 type ProjectRow = Record<string, unknown>;
 type RequestRow = Record<string, unknown>;
-type ClientSortField = 'company_name' | 'deal_value' | 'last_activity' | 'arr';
-type SortDirection = 'asc' | 'desc';
-type EnrichedClient = {
-  client: ClientRow;
-  name: string;
-  isActive: boolean;
-  owner: string;
-  health: string;
-  dealValue: number;
-  arr: number;
-  activeProjects: number;
-  requestCount: number;
-  lastTouch: Date | null;
-};
-
-const CLIENT_SORT_FEATURE_KEY = 'sort_clients_table_by_attribute';
-const sortableFields = new Set<ClientSortField>([
-  'company_name',
-  'deal_value',
-  'last_activity',
-  'arr',
-]);
 
 const currency = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
   notation: 'compact',
   maximumFractionDigits: 1,
+});
+
+const dateFormat = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
 });
 
 const owners = [
@@ -106,14 +89,6 @@ function getContractValue(client: ClientRow, projects: ProjectRow[]) {
   return base + activeBillable * 80_000;
 }
 
-function getArrValue(client: ClientRow, projects: ProjectRow[]) {
-  const seed = `${client.client_code ?? client.name ?? client.id}`;
-  const activeBillable = projects.filter(
-    (project) => project.deal_status !== 'cancelled' && project.billable !== false,
-  ).length;
-  return 72_000 + stableIndex(seed, 9) * 18_000 + activeBillable * 60_000;
-}
-
 function getHealth(
   client: ClientRow,
   projects: ProjectRow[],
@@ -162,97 +137,17 @@ function getHealth(
   return 'Strong';
 }
 
-function getSearchValue(value: string | string[] | undefined) {
-  return Array.isArray(value) ? value[0] : value;
-}
-
-function getSortField(value: string | string[] | undefined): ClientSortField {
-  const field = getSearchValue(value);
-  return field && sortableFields.has(field as ClientSortField)
-    ? (field as ClientSortField)
-    : 'last_activity';
-}
-
-function getSortDirection(value: string | string[] | undefined): SortDirection {
-  return getSearchValue(value) === 'asc' ? 'asc' : 'desc';
-}
-
-function defaultDirection(field: ClientSortField): SortDirection {
-  return field === 'company_name' ? 'asc' : 'desc';
-}
-
-function sortClients(clients: EnrichedClient[], field: ClientSortField, direction: SortDirection) {
-  const multiplier = direction === 'asc' ? 1 : -1;
-
-  return [...clients].sort((a, b) => {
-    if (field === 'company_name') {
-      return a.name.localeCompare(b.name) * multiplier;
-    }
-
-    if (field === 'last_activity') {
-      const aTime = a.lastTouch?.getTime() ?? 0;
-      const bTime = b.lastTouch?.getTime() ?? 0;
-      return (aTime - bTime) * multiplier;
-    }
-
-    if (field === 'arr') {
-      return (a.arr - b.arr) * multiplier;
-    }
-
-    return (a.dealValue - b.dealValue) * multiplier;
-  });
-}
-
-function SortHeader({
-  field,
-  label,
-  currentField,
-  currentDirection,
-}: {
-  field: ClientSortField;
-  label: string;
-  currentField: ClientSortField;
-  currentDirection: SortDirection;
-}) {
-  const isActive = field === currentField;
-  const nextDirection: SortDirection = isActive
-    ? currentDirection === 'asc' ? 'desc' : 'asc'
-    : defaultDirection(field);
-  const Icon = isActive ? currentDirection === 'asc' ? ArrowUp : ArrowDown : ArrowUpDown;
-
-  return (
-    <Link
-      href={`/clients?sort=${field}&dir=${nextDirection}`}
-      className={cn(
-        'inline-flex items-center gap-1.5 transition-colors hover:text-foreground',
-        isActive && 'text-foreground',
-      )}
-    >
-      {label}
-      <Icon className="h-3.5 w-3.5" />
-    </Link>
-  );
-}
-
-export default async function ClientsPage({
-  searchParams,
-}: {
-  searchParams?: Promise<{ sort?: string | string[]; dir?: string | string[] }>;
-}) {
+export default async function ClientsPage() {
   const { accessToken: token } = await requireAuthenticatedSession();
-  const params = await searchParams;
-  const [{ clients, count }, projectsResult, changeRequests, sortingEnabled] = await Promise.all([
+  const [{ clients, count }, projectsResult, changeRequests] = await Promise.all([
     getClients(token),
     getProjects(token),
     getChangeRequests(token),
-    hasFeatureFlag(CLIENT_SORT_FEATURE_KEY, token),
   ]);
 
   const projects = projectsResult.projects as ProjectRow[];
   const requests = changeRequests as RequestRow[];
   const now = new Date();
-  const sortField = sortingEnabled ? getSortField(params?.sort) : 'company_name';
-  const sortDirection = sortingEnabled ? getSortDirection(params?.dir) : 'asc';
 
   const openProjectCount = projects.filter(
     (project) => !['completed', 'cancelled'].includes(String(project.deal_status ?? '').toLowerCase()),
@@ -264,47 +159,6 @@ export default async function ClientsPage({
     const clientProjects = projects.filter((project) => project.client_id === client.id);
     return sum + getContractValue(client, clientProjects);
   }, 0);
-  const enrichedClients = (clients as ClientRow[]).map((client) => {
-    const name = client.name as string;
-    const clientProjects = projects.filter((project) => project.client_id === client.id);
-    const clientRequests = requests.filter((request) => {
-      const requestAccountId = request.company_account_id;
-      if (requestAccountId && requestAccountId === client.company_account_id) {
-        return true;
-      }
-
-      return (
-        String(request.customer_name ?? '').trim().toLowerCase() ===
-        name.trim().toLowerCase()
-      );
-    });
-    const activeProjects = clientProjects.filter(
-      (project) => !['completed', 'cancelled'].includes(String(project.deal_status ?? '').toLowerCase()),
-    ).length;
-    const lastTouch = [
-      parseDate(client.updated_at),
-      ...clientProjects.map((project) => parseDate(project.updated_at)),
-      ...clientRequests.map((request) => parseDate(request.updated_at ?? request.created_at)),
-    ]
-      .filter((date): date is Date => Boolean(date))
-      .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
-
-    return {
-      client,
-      name,
-      isActive: client.is_active as boolean,
-      owner: owners[stableIndex(String(client.client_code ?? name), owners.length)],
-      health: getHealth(client, clientProjects, clientRequests, now),
-      dealValue: getContractValue(client, clientProjects),
-      arr: getArrValue(client, clientProjects),
-      activeProjects,
-      requestCount: clientRequests.length,
-      lastTouch,
-    };
-  });
-  const visibleClients = sortingEnabled
-    ? sortClients(enrichedClients, sortField, sortDirection)
-    : enrichedClients;
 
   return (
     <div className="space-y-8">
@@ -362,55 +216,44 @@ export default async function ClientsPage({
         <Card className="overflow-hidden p-0">
           <CardContent className="p-0">
             <div className="hidden grid-cols-[minmax(220px,1.2fr)_0.8fr_0.7fr_0.7fr_0.7fr_0.8fr_0.6fr] gap-4 border-b bg-muted/30 px-6 py-3 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground lg:grid">
-              {sortingEnabled ? (
-                <SortHeader
-                  field="company_name"
-                  label="Account"
-                  currentField={sortField}
-                  currentDirection={sortDirection}
-                />
-              ) : (
-                <span>Account</span>
-              )}
+              <span>Account</span>
               <span>Owner</span>
-              {sortingEnabled ? (
-                <SortHeader
-                  field="deal_value"
-                  label="Deal"
-                  currentField={sortField}
-                  currentDirection={sortDirection}
-                />
-              ) : (
-                <span>Deal</span>
-              )}
-              {sortingEnabled ? (
-                <SortHeader
-                  field="arr"
-                  label="ARR"
-                  currentField={sortField}
-                  currentDirection={sortDirection}
-                />
-              ) : (
-                <span>ARR</span>
-              )}
+              <span>Contract</span>
               <span>Health</span>
+              <span>Renewal</span>
               <span>Workload</span>
-              <span className="text-right">
-                {sortingEnabled ? (
-                  <SortHeader
-                    field="last_activity"
-                    label="Activity"
-                    currentField={sortField}
-                    currentDirection={sortDirection}
-                  />
-                ) : (
-                  'Activity'
-                )}
-              </span>
+              <span className="text-right">Touch</span>
             </div>
             <div className="divide-y">
-              {visibleClients.map((row) => {
-                const { client, name, isActive, owner, health, dealValue, arr, activeProjects, requestCount, lastTouch } = row;
+              {(clients as ClientRow[]).map((client) => {
+                const name = client.name as string;
+                const isActive = client.is_active as boolean;
+                const clientProjects = projects.filter((project) => project.client_id === client.id);
+                const clientRequests = requests.filter((request) => {
+                  const requestAccountId = request.company_account_id;
+                  if (requestAccountId && requestAccountId === client.company_account_id) {
+                    return true;
+                  }
+
+                  return (
+                    String(request.customer_name ?? '').trim().toLowerCase() ===
+                    name.trim().toLowerCase()
+                  );
+                });
+                const activeProjects = clientProjects.filter(
+                  (project) => !['completed', 'cancelled'].includes(String(project.deal_status ?? '').toLowerCase()),
+                ).length;
+                const health = getHealth(client, clientProjects, clientRequests, now);
+                const lastTouch = [
+                  parseDate(client.updated_at),
+                  ...clientProjects.map((project) => parseDate(project.updated_at)),
+                  ...clientRequests.map((request) => parseDate(request.updated_at ?? request.created_at)),
+                ]
+                  .filter((date): date is Date => Boolean(date))
+                  .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+                const owner = owners[stableIndex(String(client.client_code ?? name), owners.length)];
+                const renewalDate = getRenewalDate(client, now);
+
                 return (
                   <div
                     key={client.id as string}
@@ -429,10 +272,7 @@ export default async function ClientsPage({
                       <p className="text-muted-foreground lg:text-foreground">{owner}</p>
                     </div>
                     <div className="font-display nums-tabular text-lg font-medium tabular-nums">
-                      {currency.format(dealValue)}
-                    </div>
-                    <div className="font-display nums-tabular text-lg font-medium tabular-nums">
-                      {currency.format(arr)}
+                      {currency.format(getContractValue(client, clientProjects))}
                     </div>
                     <span
                       className={cn(
@@ -443,11 +283,15 @@ export default async function ClientsPage({
                       {health}
                     </span>
                     <div className="text-sm">
+                      <p className="font-medium lg:hidden">Renewal</p>
+                      <p className="text-muted-foreground lg:text-foreground">{dateFormat.format(renewalDate)}</p>
+                    </div>
+                    <div className="text-sm">
                       <p className="font-medium">
                         {activeProjects} open {activeProjects === 1 ? 'project' : 'projects'}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        {requestCount} {requestCount === 1 ? 'request' : 'requests'}
+                        {clientRequests.length} {clientRequests.length === 1 ? 'request' : 'requests'}
                       </p>
                     </div>
                     <div className="flex items-center justify-between gap-3 text-sm lg:justify-end lg:text-right">

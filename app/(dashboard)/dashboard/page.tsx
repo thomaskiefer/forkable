@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
+import { getClientOwner } from '@/lib/synthetic';
 import { requireAuthenticatedSession } from '@/lib/auth-state';
 import {
   getChangeRequests,
@@ -50,8 +51,6 @@ const forecastWeights: Record<string, number> = {
   Lost: 0,
 };
 
-const ownerPool = ['Nia Grant', 'Maya Patel', 'Theo Brooks', 'Ari Chen'];
-
 function stringScore(value: string) {
   return [...value].reduce((sum, char) => sum + char.charCodeAt(0), 0);
 }
@@ -74,10 +73,6 @@ function daysFromLead(lead: Record<string, unknown>, baseDays: number) {
   return baseDays + (stringScore(String(lead.id)) % 18);
 }
 
-function getOwner(id: unknown) {
-  return ownerPool[stringScore(String(id)) % ownerPool.length];
-}
-
 export default async function CRMOverviewPage() {
   const { accessToken: token } = await requireAuthenticatedSession();
 
@@ -98,14 +93,16 @@ export default async function CRMOverviewPage() {
   ]);
 
   const allLeads = leadsResult.leads as Array<Record<string, unknown>>;
-  const pipelineValue = allLeads.reduce(
-    (sum, lead) => sum + (typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0),
-    0,
-  );
   const openLeads = allLeads.filter((lead) => {
     const stageName = getStageName(lead);
     return stageName !== 'Closed Won' && stageName !== 'Lost';
   });
+  // Pipeline value = open-pipeline ARR. Closed Won and Lost are no longer
+  // "in pipeline" — they belong in revenue / loss reports respectively.
+  const pipelineValue = openLeads.reduce(
+    (sum, lead) => sum + (typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0),
+    0,
+  );
   const weightedPipelineValue = openLeads.reduce((sum, lead) => {
     const dealValue = typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0;
     return sum + dealValue * (forecastWeights[getStageName(lead)] ?? 0.25);
@@ -120,9 +117,21 @@ export default async function CRMOverviewPage() {
     .filter((item) => item.age >= 7 || item.nextTouchDays <= 0)
     .sort((a, b) => b.age - a.age)
     .slice(0, 4);
+  // At-risk = high-value late-stage deals that have aged without an update.
+  // The label "Risk" is only honest if the filter actually surfaces friction —
+  // late-stage alone isn't risk, late-stage + stale is.
   const atRiskDeals = openLeads
-    .filter((lead) => ['Security Review', 'Contract Sent', 'Proposal'].includes(getStageName(lead)))
+    .filter((lead) => {
+      const stageName = getStageName(lead);
+      const age = daysSince(lead.updated_at);
+      const dealValue = typeof lead.deal_value === 'number' ? (lead.deal_value as number) : 0;
+      const isLateStage = ['Security Review', 'Contract Sent', 'Proposal'].includes(stageName);
+      return isLateStage && (age >= 7 || dealValue >= 100_000);
+    })
     .sort((a, b) => {
+      const aAge = daysSince(a.updated_at);
+      const bAge = daysSince(b.updated_at);
+      if (aAge !== bAge) return bAge - aAge;
       const aValue = typeof a.deal_value === 'number' ? (a.deal_value as number) : 0;
       const bValue = typeof b.deal_value === 'number' ? (b.deal_value as number) : 0;
       return bValue - aValue;
@@ -297,7 +306,7 @@ export default async function CRMOverviewPage() {
                       <div className="min-w-0">
                         <p className="truncate font-medium">{lead.company_name as string}</p>
                         <p className="truncate text-sm text-muted-foreground">
-                          {stageName} · {getOwner(lead.id)} · last update {age}d ago
+                          {stageName} · {getClientOwner(lead)} · last update {age}d ago
                         </p>
                       </div>
                       <div className="flex items-center gap-3 sm:justify-end">
@@ -423,7 +432,7 @@ export default async function CRMOverviewPage() {
                       <div className="min-w-0">
                         <p className="truncate font-medium">{lead.company_name as string}</p>
                         <p className="truncate text-xs text-muted-foreground">
-                          {getStageName(lead)} · {getOwner(lead.id)}
+                          {getStageName(lead)} · {getClientOwner(lead)}
                         </p>
                       </div>
                       <div className="flex items-center gap-3 sm:justify-end">
@@ -507,7 +516,7 @@ export default async function CRMOverviewPage() {
                       <div className="min-w-0">
                         <p className="truncate font-medium">{project.name as string}</p>
                         <p className="truncate text-xs text-muted-foreground">
-                          {clientName ?? 'Client'} · {getOwner(project.id)} · milestone in {daysFromLead(project, 5)}d
+                          {clientName ?? 'Client'} · {getClientOwner({ name: clientName })} · milestone in {daysFromLead(project, 5)}d
                         </p>
                       </div>
                       <span className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-[0.65rem] font-medium uppercase tracking-[0.16em] text-primary">

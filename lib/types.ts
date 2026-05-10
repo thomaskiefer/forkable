@@ -342,6 +342,7 @@ export interface ScheduledAgentTask {
   prompt?: string;
   customer_name: string;
   customer_email: string;
+  company_account_id?: string;
   task_type: ScheduledAgentTaskType;
   feature_key?: string;
   status: ScheduledAgentTaskStatus;

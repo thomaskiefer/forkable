@@ -101,10 +101,6 @@ function buildFriendlyCompletionMessage(input: {
     lines.push(`Changed ${changedFiles} ${changedFiles === 1 ? 'file' : 'files'}.`);
   }
 
-  if (input.testsTotal > 0) {
-    lines.push(`Checks passed: ${input.testsPassed}/${input.testsTotal}.`);
-  }
-
   if (input.runStatus === 'merged') {
     lines.push('Merged, deployed, and enabled for your company.');
   } else if (input.runStatus) {

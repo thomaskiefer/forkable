@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Loader2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, FilePenLine, Loader2, Search, Terminal, Wrench } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -10,6 +10,7 @@ import { Textarea } from '@/components/ui/textarea';
 import type {
   AgentRun,
   AgentRunEvent,
+  AgentStep,
   ChangeRequest,
   ChangeRequestPlan,
   ChangeRequestPlanningMessage,
@@ -77,7 +78,11 @@ function shouldCondensePlanningReply(content: string) {
 
 function messageContentForDisplay(message: PendingMessage) {
   if (message.role !== 'assistant' || !shouldCondensePlanningReply(message.content)) {
-    return message.content;
+    return message.content
+      .split('\n')
+      .filter((line) => !/^Checks passed:\s*\d+\/\d+\.$/i.test(line.trim()))
+      .join('\n')
+      .trim();
   }
 
   return [
@@ -87,8 +92,59 @@ function messageContentForDisplay(message: PendingMessage) {
   ].join('\n');
 }
 
+function getCurrentStep(steps: AgentStep[]) {
+  return (
+    steps.find((step) => step.status === 'running') ??
+    steps.find((step) => step.status === 'pending') ??
+    [...steps].reverse().find((step) => step.status === 'passed') ??
+    null
+  );
+}
+
 function shouldRefreshRun(run: AgentRun | null) {
   return run ? ['queued', 'running'].includes(run.status) : false;
+}
+
+function phaseLabel(step: AgentStep | null, run: AgentRun) {
+  if (run.status === 'queued') return 'Queued';
+  if (run.status === 'failed') return 'Needs attention';
+  if (!step) return 'Waiting for runner';
+
+  if (step.status === 'failed') return 'Needs attention';
+  if (step.order_index <= 3) return 'Preparing workspace';
+  if (step.order_index === 4) return 'Preparing backend';
+  if (step.order_index === 5) return 'Building change';
+  if (step.order_index === 6) return 'Saving changes';
+  if (step.order_index === 7) return 'Checking change';
+  return 'Shipping change';
+}
+
+function completedStepCount(steps: AgentStep[]) {
+  return steps.filter((step) => ['passed', 'skipped'].includes(step.status)).length;
+}
+
+function failureSummary(steps: AgentStep[]) {
+  const failed = steps.find((step) => step.status === 'failed');
+  if (!failed?.details) return null;
+  const text = failed.details.replace(/\s+/g, ' ').trim();
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+}
+
+function eventIcon(type: AgentRunEvent['event_type']) {
+  if (type === 'edit') return FilePenLine;
+  if (type === 'tool') return Wrench;
+  if (type === 'check') return CheckCircle2;
+  if (type === 'error') return AlertCircle;
+  if (type === 'thinking') return Search;
+  return Terminal;
+}
+
+function formatEventTime(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(new Date(value));
 }
 
 function plannerErrorText(error: unknown) {
@@ -132,43 +188,76 @@ function MessageBubble({ message }: { message: PendingMessage }) {
 
 function RunExecutionPanel({
   run,
+  steps,
   events,
 }: {
   run: AgentRun;
+  steps: AgentStep[];
   events: AgentRunEvent[];
 }) {
-  const output = events
-    .map((event) => event.body || event.title)
-    .filter(Boolean)
-    .join('')
-    .trim();
-  const failedDetails = run.runner_error?.replace(/\s+/g, ' ').trim();
+  const currentStep = getCurrentStep(steps);
+  const completed = completedStepCount(steps);
+  const total = steps.length;
+  const failedDetails = failureSummary(steps);
+  const phase = phaseLabel(currentStep, run);
 
   return (
     <div className="rounded-[0.65rem] border bg-background p-3 text-sm dark:border-white/10 dark:bg-white/[0.055]">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <p className="text-xs uppercase text-muted-foreground">Codex run</p>
+          <p className="text-xs uppercase text-muted-foreground">Build status</p>
           <div className="flex min-w-0 items-center gap-2">
             {run.status === 'running' ? <Loader2 className="size-4 shrink-0 animate-spin" /> : null}
-            <p className="truncate font-medium">{statusLabel(run.status)}</p>
+            <p className="truncate font-medium">{phase}</p>
           </div>
+          <p className="text-xs text-muted-foreground">
+            {total > 0 ? `${completed} of ${total} steps complete` : 'Waiting for the runner to claim this build'}
+          </p>
         </div>
         <Badge variant={run.status === 'failed' ? 'destructive' : 'outline'}>
           {statusLabel(run.status)}
         </Badge>
       </div>
 
-      {output ? (
-        <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap rounded-md border bg-black/90 p-3 font-mono text-xs leading-5 text-white dark:border-white/10">
-          {output}
-        </pre>
-      ) : null}
-
       {failedDetails ? (
         <p className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-2 text-xs leading-5 text-destructive">
           {failedDetails}
         </p>
+      ) : null}
+
+      {events.length > 0 ? (
+        <div className="mt-3 border-t pt-3 dark:border-white/10">
+          <p className="mb-2 text-xs uppercase text-muted-foreground">Live activity</p>
+          <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+            {events.slice(-24).map((event) => {
+              const Icon = eventIcon(event.event_type);
+
+              return (
+                <div key={event.id} className="grid grid-cols-[1rem_minmax(0,1fr)] gap-2 text-xs">
+                  <Icon
+                    className={cn(
+                      'mt-0.5 size-3.5',
+                      event.event_type === 'error' ? 'text-destructive' : 'text-muted-foreground',
+                    )}
+                  />
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <p className="truncate font-medium">{event.title}</p>
+                      <span className="shrink-0 text-muted-foreground">
+                        {formatEventTime(event.created_at)}
+                      </span>
+                    </div>
+                    {event.body ? (
+                      <p className="mt-0.5 whitespace-pre-wrap leading-5 text-muted-foreground">
+                        {event.body}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -188,10 +277,13 @@ export function FeaturePlanningChat({
   const [messages, setMessages] = useState<PendingMessage[]>(initialMessages);
   const [plan, setPlan] = useState<ChangeRequestPlan | null>(initialPlan);
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(latestRun ?? null);
+  const [currentSteps, setCurrentSteps] = useState<AgentStep[]>([]);
   const [currentEvents, setCurrentEvents] = useState<AgentRunEvent[]>([]);
   const [input, setInput] = useState('');
   const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [planningStatus, setPlanningStatus] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const currentStep = getCurrentStep(currentSteps);
 
   const nextSortOrder = useMemo(
     () => (messages.at(-1)?.sort_order ?? -1) + 1,
@@ -209,10 +301,12 @@ export function FeaturePlanningChat({
 
       const body = (await response.json()) as {
         run?: AgentRun | null;
+        steps?: AgentStep[];
         events?: AgentRunEvent[];
       };
 
       setCurrentRun(body.run ?? null);
+      setCurrentSteps(body.steps ?? []);
       setCurrentEvents(body.events ?? []);
     } catch {
       // Recovery is best-effort; the existing chat state remains usable if it fails.
@@ -223,6 +317,7 @@ export function FeaturePlanningChat({
     setMessages(initialMessages);
     setPlan(initialPlan);
     setCurrentRun(latestRun ?? null);
+    setCurrentSteps([]);
     setCurrentEvents([]);
     void recoverRunState();
   }, [initialMessages, initialPlan, latestRun, recoverRunState]);
@@ -279,6 +374,7 @@ export function FeaturePlanningChat({
     ]);
     setInput('');
     setIsSendingMessage(true);
+    setPlanningStatus('Queuing coding agent run');
 
     try {
       const response = await fetch(`/api/feature-requests/${request.id}/planning-chat`, {
@@ -298,6 +394,10 @@ export function FeaturePlanningChat({
 
       const handleEvent = (event: FeaturePlanningStreamEvent | null) => {
         if (!event) return;
+
+        if (event.type === 'delta') {
+          setPlanningStatus('Building feature');
+        }
 
         if (event.type === 'message') {
           const nextAssistantMessage = makePendingMessage(
@@ -321,6 +421,10 @@ export function FeaturePlanningChat({
         if (event.type === 'run') {
           setCurrentRun(event.payload.run);
           void recoverRunState();
+        }
+
+        if (event.type === 'status') {
+          setPlanningStatus(event.message);
         }
 
         if (event.type === 'warning') {
@@ -400,6 +504,7 @@ export function FeaturePlanningChat({
       });
     } finally {
       setIsSendingMessage(false);
+      setPlanningStatus(null);
       void recoverRunState();
     }
   }
@@ -433,7 +538,15 @@ export function FeaturePlanningChat({
         ) : (
           messages.map((message) => <MessageBubble key={message.id} message={message} />)
         )}
-        {currentRun ? <RunExecutionPanel run={currentRun} events={currentEvents} /> : null}
+        {currentRun ? (
+          <RunExecutionPanel run={currentRun} steps={currentSteps} events={currentEvents} />
+        ) : null}
+        {planningStatus ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Terminal className="size-3.5" />
+            <span className="capitalize">{planningStatus}</span>
+          </div>
+        ) : null}
       </div>
 
       <footer className="border-t bg-background/70 p-3 dark:border-white/10 dark:bg-white/[0.035]">
@@ -462,6 +575,9 @@ export function FeaturePlanningChat({
               {currentRun ? (
                 <>
                   Latest run: {statusLabel(currentRun.status)}
+                  {currentStep || currentRun.status === 'queued'
+                    ? ` · ${phaseLabel(currentStep, currentRun)}`
+                    : null}
                 </>
               ) : (
                 'No run queued'

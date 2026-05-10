@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
+import { getClientOwner, stableIndex } from '@/lib/synthetic';
 import { cn } from '@/lib/utils';
 
 type ProjectRow = Record<string, unknown>;
@@ -33,24 +34,10 @@ const phaseTone: Record<string, string> = {
   Closed: 'bg-muted-foreground',
 };
 
-const owners = [
-  'Priya Shah',
-  'Marcus Lee',
-  'Sam Rivera',
-  'Lina Chen',
-  'Jordan Ellis',
-  'Ari Morgan',
-];
-
 const dateFormat = new Intl.DateTimeFormat('en-US', {
   month: 'short',
   day: 'numeric',
 });
-
-function stableIndex(seed: string, modulo: number) {
-  const total = seed.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  return total % modulo;
-}
 
 function parseDate(value: unknown) {
   if (typeof value !== 'string') return null;
@@ -199,7 +186,7 @@ export default async function ProjectsPage() {
                 const progress = getProgress(project, now);
                 const phase = getPhase(project, progress);
                 const risk = getRisk(project, now);
-                const owner = owners[stableIndex(String(project.id ?? name), owners.length)];
+                const owner = getClientOwner(project);
 
                 return (
                   <div

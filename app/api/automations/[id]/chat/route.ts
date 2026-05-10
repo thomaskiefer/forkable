@@ -2,11 +2,12 @@ import { NextResponse } from 'next/server';
 import { getAuthenticatedSession } from '@/lib/auth-state';
 import {
   addScheduledAgentMessages,
+  getScheduledAgentMessages,
   getScheduledAgentTask,
   updateScheduledAgentTask,
 } from '@/lib/queries';
 import { normalizeRunnerUrl, runnerEndpointUrl, runnerRequestError } from '@/lib/runner-url';
-import type { ScheduledAgentTask } from '@/lib/types';
+import type { ScheduledAgentMessage, ScheduledAgentTask } from '@/lib/types';
 
 function taskMessage(role: 'user' | 'assistant', content: string) {
   return {
@@ -21,10 +22,25 @@ type AutomationSetupResult = {
   title?: string;
   prompt?: string;
   cronExpression?: string | null;
+  runAt?: string | null;
   scheduleLabel?: string | null;
-  scheduleType?: 'manual' | 'daily' | 'weekly' | 'monthly' | 'cron';
+  scheduleType?: 'manual' | 'once' | 'daily' | 'weekly' | 'monthly' | 'cron';
   timezone?: string;
   assistantMessage?: string;
+  toolCall?: {
+    name?: string;
+    arguments?: AutomationRegistration;
+  };
+};
+
+type AutomationRegistration = {
+  title?: string;
+  prompt?: string;
+  cronExpression?: string | null;
+  runAt?: string | null;
+  scheduleLabel?: string | null;
+  scheduleType?: 'manual' | 'once' | 'daily' | 'weekly' | 'monthly' | 'cron';
+  timezone?: string;
 };
 
 function getRunnerConfig() {
@@ -111,52 +127,38 @@ function nextRunFromCronInTimezone(cronExpression?: string | null, timezone = 'A
     return new Date(Date.now() + interval * 60 * 1000).toISOString();
   }
 
-  const match = cronExpression?.trim().match(/^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5)$/);
-  if (!match) return null;
-
-  const minute = Number(match[1]);
-  const hour = Number(match[2]);
-  if (minute < 0 || minute > 59 || hour < 0 || hour > 23) return null;
-
+  const cron = parseCronExpression(cronExpression);
+  if (!cron) return null;
   const now = new Date();
   const nowParts = getTimezoneParts(now, timezone);
-  const targetParts = {
-    year: nowParts.year,
-    month: nowParts.month,
-    day: nowParts.day,
-    hour,
-    minute,
-    second: 0,
-  };
-  let next = zonedTimeToUtc(targetParts, timezone);
-  if (next <= now) {
-    next = zonedTimeToUtc(
+
+  for (let offset = 0; offset <= 370; offset += 1) {
+    const candidate = zonedTimeToUtc(
       {
-        ...targetParts,
-        day: targetParts.day + 1,
+        year: nowParts.year,
+        month: nowParts.month,
+        day: nowParts.day + offset,
+        hour: cron.hour,
+        minute: cron.minute,
+        second: 0,
       },
       timezone,
     );
-  }
+    const candidateParts = getTimezoneParts(candidate, timezone);
+    const maxDay = daysInMonth(candidateParts.year, candidateParts.month);
 
-  if (match[3] === '1-5') {
-    while ([0, 6].includes(getTimezoneWeekday(next, timezone))) {
-      const nextParts = getTimezoneParts(next, timezone);
-      next = zonedTimeToUtc(
-        {
-          year: nextParts.year,
-          month: nextParts.month,
-          day: nextParts.day + 1,
-          hour,
-          minute,
-          second: 0,
-        },
-        timezone,
-      );
+    if (cron.dayOfMonth !== null && (cron.dayOfMonth > maxDay || candidateParts.day !== cron.dayOfMonth)) {
+      continue;
+    }
+    if (cron.weekdays && !cron.weekdays.includes(getTimezoneWeekday(candidate, timezone))) {
+      continue;
+    }
+    if (candidate > now) {
+      return candidate.toISOString();
     }
   }
 
-  return next.toISOString();
+  return null;
 }
 
 function getTimezoneWeekday(date: Date, timezone: string) {
@@ -167,9 +169,158 @@ function getTimezoneWeekday(date: Date, timezone: string) {
   return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday);
 }
 
+function daysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function parseCronExpression(cronExpression?: string | null) {
+  const parts = cronExpression?.trim().split(/\s+/) ?? [];
+  if (parts.length !== 5) return null;
+
+  const [minuteRaw, hourRaw, dayOfMonthRaw, monthRaw, dayOfWeekRaw] = parts;
+  const minute = Number(minuteRaw);
+  const hour = Number(hourRaw);
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (monthRaw !== '*') return null;
+
+  const dayOfMonth = dayOfMonthRaw === '*' ? null : Number(dayOfMonthRaw);
+  if (dayOfMonth !== null && (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31)) {
+    return null;
+  }
+
+  let weekdays: number[] | null = null;
+  if (dayOfWeekRaw === '*') {
+    weekdays = null;
+  } else if (dayOfWeekRaw === '1-5') {
+    weekdays = [1, 2, 3, 4, 5];
+  } else {
+    const day = Number(dayOfWeekRaw);
+    if (!Number.isInteger(day) || day < 0 || day > 6) return null;
+    weekdays = [day];
+  }
+
+  return { minute, hour, dayOfMonth, weekdays };
+}
+
+function futureRunAt(value?: string | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date <= new Date()) return null;
+  return date.toISOString();
+}
+
+function hasRelativeTime(value: string) {
+  return /\bin\s+\d{1,4}\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/i.test(value);
+}
+
+function isOnlyRelativeTime(value: string) {
+  return /^\s*in\s+\d{1,4}\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s*$/i.test(value);
+}
+
+function isOnceConfirmation(value: string) {
+  return /^(?:(?:just\s+)?once|one[-\s]?time|single\s+run|just\s+one\s+time)$/i.test(value.trim());
+}
+
+function relativeTimeMatch(value: string) {
+  return value.match(/\bin\s+(\d{1,4})\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/i);
+}
+
+function relativeUnitMs(unit: string) {
+  const normalized = unit.toLowerCase();
+  if (normalized.startsWith('hour') || ['h', 'hr', 'hrs'].includes(normalized)) return 60 * 60 * 1000;
+  if (normalized.startsWith('day') || normalized === 'd') return 24 * 60 * 60 * 1000;
+  return 60 * 1000;
+}
+
+function relativeUnitLabel(unitMs: number) {
+  if (unitMs === 60 * 60 * 1000) return 'hour';
+  if (unitMs === 24 * 60 * 60 * 1000) return 'day';
+  return 'minute';
+}
+
+function cleanPrompt(value: string) {
+  return value
+    .replace(/\bin\s+\d{1,4}\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/ig, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[,.!?;:]+$/g, '');
+}
+
+function inferPromptFromHistory(history: ScheduledAgentMessage[]) {
+  return [...history]
+    .reverse()
+    .filter((message) => message.role === 'user')
+    .map((message) => cleanPrompt(message.content))
+    .find((content) => content && !isOnceConfirmation(content) && !isOnlyRelativeTime(content)) ?? '';
+}
+
+function repairRelativeOneShotRegistration(input: {
+  text: string;
+  history: ScheduledAgentMessage[];
+  registration: AutomationRegistration | null;
+}): AutomationRegistration | null {
+  const userHistory = input.history.filter((message) => message.role === 'user');
+  const latestWithRelativeTime = hasRelativeTime(input.text)
+    ? input.text
+    : [...userHistory].reverse().find((message) => hasRelativeTime(message.content))?.content ?? '';
+  const match = relativeTimeMatch(latestWithRelativeTime);
+  if (!match?.[1] || !match[2]) return null;
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  const unitMs = relativeUnitMs(match[2]);
+  const unitLabel = relativeUnitLabel(unitMs);
+  const label = `${amount} ${unitLabel}${amount === 1 ? '' : 's'}`;
+  const prompt = cleanPrompt(latestWithRelativeTime) ||
+    input.registration?.prompt?.trim() ||
+    inferPromptFromHistory(input.history);
+  if (!prompt) return null;
+
+  const title = input.registration?.title?.trim() ||
+    (/slack/i.test(prompt) ? 'Slack summary' : prompt.slice(0, 80));
+
+  return {
+    ...input.registration,
+    title,
+    prompt,
+    cronExpression: null,
+    runAt: new Date(Date.now() + amount * unitMs).toISOString(),
+    scheduleLabel: `Once in ${label}`,
+    scheduleType: 'once',
+    timezone: input.registration?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Los_Angeles',
+  };
+}
+
+function getRegistration(setup: AutomationSetupResult): AutomationRegistration | null {
+  if (
+    setup.toolCall?.name === 'register_automation' &&
+    setup.toolCall.arguments &&
+    typeof setup.toolCall.arguments === 'object'
+  ) {
+    return setup.toolCall.arguments;
+  }
+
+  if (setup.status === 'configured') {
+    return {
+      title: setup.title,
+      prompt: setup.prompt,
+      cronExpression: setup.cronExpression,
+      runAt: setup.runAt,
+      scheduleLabel: setup.scheduleLabel,
+      scheduleType: setup.scheduleType,
+      timezone: setup.timezone,
+    };
+  }
+
+  return null;
+}
+
 async function requestAutomationSetupFromRunner(input: {
   message: string;
   task: ScheduledAgentTask;
+  history: Array<Pick<ScheduledAgentMessage, 'role' | 'content'>>;
 }) {
   const runner = getRunnerConfig();
   if (!runner) {
@@ -225,10 +376,18 @@ export async function POST(
   if (!text) {
     return NextResponse.json({ error: 'message is required.' }, { status: 400 });
   }
+  const history = await getScheduledAgentMessages(id, token);
 
   let setup: AutomationSetupResult;
   try {
-    setup = await requestAutomationSetupFromRunner({ message: text, task });
+    setup = await requestAutomationSetupFromRunner({
+      message: text,
+      task,
+      history: history.slice(-10).map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+    });
   } catch (error) {
     return NextResponse.json(
       {
@@ -238,9 +397,21 @@ export async function POST(
     );
   }
 
-  const canSetUp = setup.status === 'configured' && Boolean(setup.cronExpression);
-  const prompt = setup.prompt?.trim() || text;
-  const title = setup.title?.trim() || task.title || 'Scheduled automation';
+  const rawRegistration = getRegistration(setup);
+  const registration = rawRegistration && !futureRunAt(rawRegistration.runAt) && !rawRegistration.cronExpression
+    ? repairRelativeOneShotRegistration({ text, history, registration: rawRegistration }) ?? rawRegistration
+    : rawRegistration;
+  const nextRunAt = registration
+    ? futureRunAt(registration.runAt) ??
+      nextRunFromCronInTimezone(
+        registration.cronExpression,
+        registration.timezone || 'America/Los_Angeles',
+      )
+    : null;
+  const canSetUp = Boolean(registration && nextRunAt);
+  const invalidSchedule = Boolean(registration && !nextRunAt);
+  const prompt = registration?.prompt?.trim() || setup.prompt?.trim() || text;
+  const title = registration?.title?.trim() || setup.title?.trim() || task.title || 'Scheduled automation';
   const updatedTask = canSetUp
     ? await updateScheduledAgentTask(
         id,
@@ -251,14 +422,11 @@ export async function POST(
           instructions: prompt,
           prompt,
           status: 'active',
-          scheduleType: setup.scheduleType || 'cron',
-          cronExpression: setup.cronExpression,
-          schedule_label: setup.scheduleLabel || setup.cronExpression,
-          timezone: setup.timezone || 'America/Los_Angeles',
-          nextRunAt: nextRunFromCronInTimezone(
-            setup.cronExpression,
-            setup.timezone || 'America/Los_Angeles',
-          ),
+          scheduleType: registration?.runAt ? 'once' : registration?.scheduleType || 'cron',
+          cronExpression: registration?.runAt ? null : registration?.cronExpression,
+          schedule_label: registration?.scheduleLabel || registration?.cronExpression || 'Once',
+          timezone: registration?.timezone || 'America/Los_Angeles',
+          nextRunAt,
           activated_at: new Date().toISOString(),
           paused_at: null,
           draft_prompt: prompt,
@@ -272,6 +440,25 @@ export async function POST(
         token,
       )
     : null;
+  const draftTask = !canSetUp && !invalidSchedule && (setup.prompt?.trim() || setup.title?.trim())
+    ? await updateScheduledAgentTask(
+        id,
+        {
+          title,
+          name: title,
+          description: prompt,
+          instructions: prompt,
+          prompt,
+          draft_prompt: prompt,
+          metadata: {
+            ...task.metadata,
+            source: 'automation_chat',
+            setup_pending: true,
+          },
+        },
+        token,
+      )
+    : null;
 
   const messages = await addScheduledAgentMessages(
     id,
@@ -279,9 +466,11 @@ export async function POST(
       taskMessage('user', text),
       taskMessage(
         'assistant',
-        canSetUp
+          canSetUp
           ? setup.assistantMessage ||
               `Set up and activated. I will run this automation ${setup.scheduleLabel?.toLowerCase()}.`
+          : invalidSchedule
+            ? 'I could not activate that schedule. Use a daily, weekday, weekly, monthly day-of-month, or every-N-minutes schedule.'
           : setup.assistantMessage ||
               'I have the task. Tell me when it should run, for example: "every day at 3:23 PM PT."',
       ),
@@ -290,5 +479,5 @@ export async function POST(
     token,
   );
 
-  return NextResponse.json({ messages, task: updatedTask ?? task });
+  return NextResponse.json({ messages, task: updatedTask ?? draftTask ?? task });
 }

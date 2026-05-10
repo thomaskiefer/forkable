@@ -5,6 +5,7 @@ import {
   createQueuedAgentRunFromPlan,
   getAgentRunEvents,
   getAgentRunsForRequest,
+  getAgentSteps,
   getChangeRequest,
   getLatestChangeRequestPlan,
 } from '@/lib/queries';
@@ -30,9 +31,10 @@ export async function GET(
 
   const runs = await getAgentRunsForRequest(id, accessToken);
   const run = runs[0] ?? null;
+  const steps = run ? await getAgentSteps(run.id, accessToken) : [];
   const events = run ? await getAgentRunEvents(run.id, accessToken) : [];
 
-  return NextResponse.json({ run, events });
+  return NextResponse.json({ run, steps, events });
 }
 
 export async function POST(

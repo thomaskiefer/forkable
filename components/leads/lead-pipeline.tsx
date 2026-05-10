@@ -301,33 +301,44 @@ export function LeadPipeline({
       });
   };
 
+  const isOpenStage = (stageName: string) => {
+    const lower = stageName.toLowerCase();
+    return lower !== 'closed won' && lower !== 'lost';
+  };
   const totalValue = useMemo(
     () =>
-      stages.reduce(
-        (sum, s) => sum + s.leads.reduce((acc, l) => acc + (l.deal_value ?? 0), 0),
-        0,
-      ),
+      stages
+        .filter((s) => isOpenStage(s.name))
+        .reduce(
+          (sum, s) => sum + s.leads.reduce((acc, l) => acc + (l.deal_value ?? 0), 0),
+          0,
+        ),
     [stages],
   );
   const totalLeads = useMemo(
-    () => stages.reduce((sum, s) => sum + s.leads.length, 0),
+    () =>
+      stages
+        .filter((s) => isOpenStage(s.name))
+        .reduce((sum, s) => sum + s.leads.length, 0),
     [stages],
   );
   const weightedValue = useMemo(
     () =>
-      stages.reduce(
-        (sum, stage) =>
-          sum +
-          stage.leads.reduce(
-            (stageSum, lead) =>
-              stageSum +
-              ((lead.deal_value ?? 0) *
-                getStageProbability(stage, stages.length, lead.status)) /
-                100,
-            0,
-          ),
-        0,
-      ),
+      stages
+        .filter((s) => isOpenStage(s.name))
+        .reduce(
+          (sum, stage) =>
+            sum +
+            stage.leads.reduce(
+              (stageSum, lead) =>
+                stageSum +
+                ((lead.deal_value ?? 0) *
+                  getStageProbability(stage, stages.length, lead.status)) /
+                  100,
+              0,
+            ),
+          0,
+        ),
     [stages],
   );
   const visibleLeads = useMemo(

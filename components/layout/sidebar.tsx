@@ -66,10 +66,12 @@ export function Sidebar() {
 
     void loadUnreadNotifications();
     const intervalId = globalThis.setInterval(loadUnreadNotifications, 30000);
+    globalThis.addEventListener('notifications:changed', loadUnreadNotifications);
 
     return () => {
       cancelled = true;
       globalThis.clearInterval(intervalId);
+      globalThis.removeEventListener('notifications:changed', loadUnreadNotifications);
     };
   }, [pathname]);
 

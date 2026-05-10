@@ -187,8 +187,14 @@ export function LeadsList({
       });
   }, [leads, query, sortKey, sourceFilter, stageFilter, statusFilter, urgencyFilter]);
 
-  const totalValue = useMemo(
-    () => leads.reduce((sum, l) => sum + (l.deal_value ?? 0), 0),
+  const openPipelineValue = useMemo(
+    () =>
+      leads
+        .filter((lead) => {
+          const stageName = lead.current_stage?.name?.toLowerCase();
+          return stageName !== 'closed won' && stageName !== 'lost';
+        })
+        .reduce((sum, l) => sum + (l.deal_value ?? 0), 0),
     [leads],
   );
   const weightedValue = useMemo(
@@ -207,7 +213,7 @@ export function LeadsList({
         title="Leads"
         description={
           initialCount > 0
-            ? `${initialCount} ${initialCount === 1 ? 'lead' : 'leads'} · ${currency.format(totalValue)} in pipeline`
+            ? `${initialCount} ${initialCount === 1 ? 'lead' : 'leads'} · ${currency.format(openPipelineValue)} open pipeline`
             : 'Your pipeline starts here.'
         }
         actions={

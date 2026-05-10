@@ -45,6 +45,19 @@ function isMissingNotificationsTable(error: { message?: string } | null) {
   );
 }
 
+function isMissingScheduledTaskCompanyColumn(error: { message?: string } | null) {
+  const message = error?.message ?? '';
+  return (
+    message.includes('company_account_id') &&
+    message.includes('scheduled_agent_tasks') &&
+    (
+      message.includes('does not exist') ||
+      message.includes('not found') ||
+      message.includes('Could not find')
+    )
+  );
+}
+
 // ============================================================
 // Clients
 // ============================================================
@@ -918,10 +931,11 @@ export async function getAgentRunEvents(runId: string, accessToken?: string | nu
     .from('agent_run_events')
     .select('*')
     .eq('run_id', runId)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
+    .range(0, 119);
 
-  if (error && /agent_run_events/i.test(error.message ?? '')) return [];
-  assertNoDatabaseError(error, 'Unable to load agent run output.');
+  assertNoDatabaseError(error, 'Unable to load agent run events.');
   return data ?? [];
 }
 
@@ -1176,6 +1190,8 @@ export async function createScheduledAgentTask(
     customer_name?: string;
     customerEmail?: string;
     customer_email?: string;
+    companyAccountId?: string | null;
+    company_account_id?: string | null;
     taskType?: ScheduledAgentTaskType;
     task_type?: ScheduledAgentTaskType;
     featureKey?: string | null;
@@ -1204,33 +1220,46 @@ export async function createScheduledAgentTask(
   accessToken?: string | null,
 ) {
   const insforge = getInsforge(accessToken);
-  const { data, error } = await insforge.database
+  const record = {
+    title: input.title,
+    name: input.name ?? input.title,
+    description: input.description ?? '',
+    instructions: input.instructions ?? null,
+    prompt: input.prompt ?? null,
+    customer_name: input.customerName ?? input.customer_name ?? '',
+    customer_email: input.customerEmail ?? input.customer_email ?? '',
+    company_account_id: input.companyAccountId ?? input.company_account_id ?? null,
+    task_type: input.taskType ?? input.task_type ?? 'monitor_context',
+    feature_key: input.featureKey ?? input.feature_key ?? null,
+    status: input.status ?? 'active',
+    schedule_type: input.scheduleType ?? input.schedule_type ?? 'manual',
+    schedule: input.schedule ?? null,
+    schedule_label: input.schedule_label ?? null,
+    rrule: input.rrule ?? null,
+    cron_expression: input.cronExpression ?? input.cron_expression ?? null,
+    timezone: input.timezone ?? 'UTC',
+    change_request_id: input.changeRequestId ?? input.change_request_id ?? null,
+    plan_id: input.planId ?? input.plan_id ?? null,
+    next_run_at: input.nextRunAt ?? input.next_run_at ?? null,
+    metadata: input.metadata ?? {},
+    context_snapshot: input.contextSnapshot ?? input.context_snapshot ?? {},
+    user_id: input.userId ?? input.user_id,
+  };
+
+  let { data, error } = await insforge.database
     .from('scheduled_agent_tasks')
-    .insert([{
-      title: input.title,
-      name: input.name ?? input.title,
-      description: input.description ?? '',
-      instructions: input.instructions ?? null,
-      prompt: input.prompt ?? null,
-      customer_name: input.customerName ?? input.customer_name ?? '',
-      customer_email: input.customerEmail ?? input.customer_email ?? '',
-      task_type: input.taskType ?? input.task_type ?? 'monitor_context',
-      feature_key: input.featureKey ?? input.feature_key ?? null,
-      status: input.status ?? 'active',
-      schedule_type: input.scheduleType ?? input.schedule_type ?? 'manual',
-      schedule: input.schedule ?? null,
-      schedule_label: input.schedule_label ?? null,
-      rrule: input.rrule ?? null,
-      cron_expression: input.cronExpression ?? input.cron_expression ?? null,
-      timezone: input.timezone ?? 'UTC',
-      change_request_id: input.changeRequestId ?? input.change_request_id ?? null,
-      plan_id: input.planId ?? input.plan_id ?? null,
-      next_run_at: input.nextRunAt ?? input.next_run_at ?? null,
-      metadata: input.metadata ?? {},
-      context_snapshot: input.contextSnapshot ?? input.context_snapshot ?? {},
-      user_id: input.userId ?? input.user_id,
-    }])
+    .insert([record])
     .select('*');
+
+  if (isMissingScheduledTaskCompanyColumn(error)) {
+    const { company_account_id: _companyAccountId, ...legacyRecord } = record;
+    const retry = await insforge.database
+      .from('scheduled_agent_tasks')
+      .insert([legacyRecord])
+      .select('*');
+    data = retry.data;
+    error = retry.error;
+  }
 
   assertNoDatabaseError(error, 'Unable to create scheduled agent task.');
   return (data?.[0] ?? null) as ScheduledAgentTask | null;
@@ -1248,6 +1277,8 @@ export async function updateScheduledAgentTask(
     customer_name?: string;
     customerEmail?: string;
     customer_email?: string;
+    companyAccountId?: string | null;
+    company_account_id?: string | null;
     taskType?: ScheduledAgentTaskType;
     task_type?: ScheduledAgentTaskType;
     featureKey?: string | null;
@@ -1292,6 +1323,8 @@ export async function updateScheduledAgentTask(
   if (updates.customer_name !== undefined) record.customer_name = updates.customer_name;
   if (updates.customerEmail !== undefined) record.customer_email = updates.customerEmail;
   if (updates.customer_email !== undefined) record.customer_email = updates.customer_email;
+  if (updates.companyAccountId !== undefined) record.company_account_id = updates.companyAccountId;
+  if (updates.company_account_id !== undefined) record.company_account_id = updates.company_account_id;
   if (updates.taskType !== undefined) record.task_type = updates.taskType;
   if (updates.task_type !== undefined) record.task_type = updates.task_type;
   if (updates.featureKey !== undefined) record.feature_key = updates.featureKey;
@@ -1497,6 +1530,30 @@ export async function createQueuedAgentRunFromPlan(
   if (!run) throw new Error('The coding agent run was not created.');
 
   try {
+    const steps = [
+      'Load finalized planning chat and context bundle',
+      'Use Nia to inspect repo, migrations, RLS, and UI patterns',
+      `Create Git branch feat/${branchPart}`,
+      `Create InsForge backend branch ${branchPart}`,
+      'Implement additive schema and backend enforcement',
+      'Update feature-gated CRM UI',
+      'Deploy preview and run smoke tests',
+      'Merge, deploy, enable company flag, and notify requester',
+    ].map((label, index) => ({
+      run_id: run.id,
+      order_index: index + 1,
+      label,
+      status: index === 0 ? 'running' : 'pending',
+      details: index === 0 ? plan.summary : null,
+      user_id: userId,
+    }));
+
+    const { error: stepsError } = await insforge.database
+      .from('agent_steps')
+      .insert(steps);
+
+    assertNoDatabaseError(stepsError, 'Unable to create agent steps.');
+
     const { error: planError } = await insforge.database
       .from('change_request_plans')
       .update({
@@ -1615,6 +1672,29 @@ export async function createQueuedAgentRunFromScheduledExecution(
   if (!run) throw new Error('The scheduled coding agent run was not created.');
 
   try {
+    const steps = [
+      'Load scheduled task, finalized plan, and context bundle',
+      'Use Nia to inspect repo, migrations, RLS, and UI patterns',
+      `Create Git branch feat/${branchPart}`,
+      `Create InsForge backend branch ${branchPart}`,
+      'Implement additive changes requested by the scheduled task',
+      'Deploy preview and run smoke tests',
+      'Merge, deploy, enable company flag, and notify requester',
+    ].map((label, index) => ({
+      run_id: run.id,
+      order_index: index + 1,
+      label,
+      status: index === 0 ? 'running' : 'pending',
+      details: index === 0 ? task.title : null,
+      user_id: userId,
+    }));
+
+    const { error: stepsError } = await insforge.database
+      .from('agent_steps')
+      .insert(steps);
+
+    assertNoDatabaseError(stepsError, 'Unable to create scheduled agent steps.');
+
     const now = new Date().toISOString();
     const { error: executionError } = await insforge.database
       .from('scheduled_agent_executions')
